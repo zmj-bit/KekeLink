@@ -1,0 +1,5 @@
+{
+  "name": "KekeLink",
+  "description": "A secure three-sided digital platform for Keke transport in Nigeria, featuring AI-driven safety, driver verification, and real-time tracking.",
+  "requestFramePermissions": ["camera", "geolocation"]
+}
