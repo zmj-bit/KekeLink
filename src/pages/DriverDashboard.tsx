@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X, Car } from 'lucide-react';
+import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X, Car, MapPin, MessageCircle } from 'lucide-react';
 import { geminiService } from '../services/geminiService';
 import { SafetyReportModal } from '../components/SafetyReportModal';
 
@@ -31,8 +31,13 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   const [showShiftSummary, setShowShiftSummary] = useState(false);
   const [passengerStatus, setPassengerStatus] = useState<string | null>(null);
   const [tripStartTime, setTripStartTime] = useState<string | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [sosSent, setSosSent] = useState(false);
   const [nearbyPassengers, setNearbyPassengers] = useState<any[]>([]);
   const [nearbyKekes, setNearbyKekes] = useState<any[]>([]);
+  const [detailedRoute, setDetailedRoute] = useState<any>(null);
   const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number }>({ lat: 12.0022, lng: 8.5920 });
   const [locationStatus, setLocationStatus] = useState<'active' | 'error' | 'requesting'>('requesting');
   const locationRef = useRef(currentLocation);
@@ -72,7 +77,16 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
       fetchSafetyCoaching(shiftMetrics);
     }, 2000); // Debounce coaching calls
     return () => clearTimeout(timeout);
-  }, [shiftMetrics.trips_completed, shiftMetrics.anomalies_detected, shiftMetrics.incidents_reported]);
+  }, [shiftMetrics.trips_completed, shiftMetrics.anomalies_detected, shiftMetrics.incidents_reported, shiftMetrics.route_adherence]);
+
+  useEffect(() => {
+    if (activeTrip && tripProgress > 0) {
+      geminiService.getDetailedRoute(activeTrip.origin, activeTrip.destination, currentLocation.lat, currentLocation.lng)
+        .then(setDetailedRoute);
+    } else {
+      setDetailedRoute(null);
+    }
+  }, [activeTrip?.id, tripProgress > 0]);
 
   // Simulate passenger status updates during pickup phase
   useEffect(() => {
@@ -173,25 +187,71 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   }, [activeTrip, tripProgress]);
 
   useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+    let isComponentMounted = true;
+    let watchId: number | null = null;
+    let fallbackInterval: any = null;
+    let passengerSimulation: any = null;
+
+    const connect = () => {
+      if (!isComponentMounted || !isOnShift) return;
+      
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (ws) ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'driver' }));
+        };
+
+        ws.onerror = (error) => {
+          if (ws?.readyState !== WebSocket.CLOSED) {
+            console.warn("WebSocket Connection Issue (Expected in some dev environments)");
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'safety_alert') {
+              setAlerts(prev => [data, ...prev].slice(0, 3));
+            }
+            if (data.type === 'sos_alert') {
+              const tripInfo = data.tripData ? ` (Trip: ${data.tripData.origin} to ${data.tripData.destination})` : '';
+              setAlerts(prev => [{
+                category: 'EMERGENCY SOS',
+                summary: `User ${data.userId} needs immediate help at ${data.location}${tripInfo}`,
+                location: data.location,
+                isSOS: true
+              }, ...prev].slice(0, 3));
+            }
+            if (data.type === 'nearby_kekes') {
+              setNearbyKekes(data.locations.filter((k: any) => k.driverId !== user.id));
+            }
+          } catch (e) {
+            console.error("Failed to parse WS message", e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (isComponentMounted && isOnShift) {
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
+      } catch (e) {
+        reconnectTimeout = setTimeout(connect, 5000);
+      }
+    };
+
     if (isOnShift) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'driver' }));
-      };
-
-      ws.onerror = (error) => {
-        console.error("WebSocket Error:", error);
-      };
-
-      let watchId: number | null = null;
-      let fallbackInterval: any = null;
+      connect();
 
       const sendLocation = (lat: number, lng: number) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ 
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ 
             type: 'location_update', 
             lat, 
             lng,
@@ -214,20 +274,22 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           (error) => {
             if (error.code === 1) {
               console.warn("Geolocation permission denied. Using fallback.");
+            } else if (error.code === 2) {
+              console.warn("Geolocation position unavailable. Using fallback.");
+            } else if (error.code === 3) {
+              console.warn("Geolocation timeout. Using fallback.");
             } else {
               console.warn("Geolocation issue:", error.message || "Unknown error", `(Code: ${error.code})`);
             }
-            // Fallback to a central location in Kano if GPS fails (common in preview/dev)
             const fallbackLat = 12.0022;
             const fallbackLng = 8.5920;
             setCurrentLocation({ lat: fallbackLat, lng: fallbackLng });
-            setLocationStatus('active'); // Set to active so the app continues with fallback
+            setLocationStatus('active');
             sendLocation(fallbackLat, fallbackLng);
           },
           { enableHighAccuracy: false, maximumAge: 30000, timeout: 15000 }
         );
 
-        // Fallback interval to ensure periodic updates even if stationary or GPS lost
         fallbackInterval = setInterval(() => {
           if (statusRef.current === 'active' || statusRef.current === 'error') {
             sendLocation(locationRef.current.lat, locationRef.current.lng);
@@ -242,9 +304,8 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         sendLocation(fallbackLat, fallbackLng);
       }
 
-      // Simulate receiving nearby passengers
-      const passengerSimulation = setInterval(() => {
-        if (!activeTrip) {
+      passengerSimulation = setInterval(() => {
+        if (!activeTripRef.current) {
           const mockPassengers = [
             { id: 101, name: 'Zainab Aliyu', origin: 'Bayero University (Old Site)', destination: 'Sabon Gari Market', fare: 600, distance: '0.8km', type: 'Student', isRecommended: true },
             { id: 102, name: 'Musa Bello', origin: 'Kano State Library', destination: 'Zoo Road', fare: 450, distance: '1.2km', type: 'Regular', isRecommended: false },
@@ -255,34 +316,19 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           setNearbyPassengers([]);
         }
       }, 5000);
-
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'safety_alert') {
-          setAlerts(prev => [data, ...prev].slice(0, 3));
-        }
-        if (data.type === 'sos_alert') {
-          const tripInfo = data.tripData ? ` (Trip: ${data.tripData.origin} to ${data.tripData.destination})` : '';
-          setAlerts(prev => [{
-            category: 'EMERGENCY SOS',
-            summary: `User ${data.userId} needs immediate help at ${data.location}${tripInfo}`,
-            location: data.location,
-            isSOS: true
-          }, ...prev].slice(0, 3));
-        }
-        if (data.type === 'nearby_kekes') {
-          setNearbyKekes(data.locations.filter((k: any) => k.driverId !== user.id));
-        }
-      };
-
-      return () => {
-        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-        if (fallbackInterval) clearInterval(fallbackInterval);
-        clearInterval(passengerSimulation);
-        ws.close();
-        wsRef.current = null;
-      };
     }
+
+    return () => {
+      isComponentMounted = false;
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      if (fallbackInterval) clearInterval(fallbackInterval);
+      if (passengerSimulation) clearInterval(passengerSimulation);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
   }, [isOnShift, user.id, user.name]);
 
   const startShift = () => {
@@ -319,15 +365,66 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     }
   };
 
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !activeTrip) return;
+    
+    const userMsg = { role: 'driver', text: chatInput, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
+    setChatMessages(prev => [...prev, userMsg]);
+    const currentInput = chatInput;
+    setChatInput('');
+    
+    // Simulate passenger response using AI
+    try {
+      const passengerReply = await geminiService.chatWithAssistant(
+        currentInput, 
+        `You are a passenger named ${activeTrip.passenger} in Kano, Nigeria. A Keke driver named ${user.name} just messaged you: "${currentInput}". Respond briefly and naturally in English with a touch of Hausa (e.g., Sannu, Na gode). You are waiting for them or currently on a trip to ${activeTrip.destination}.`
+      );
+      
+      setTimeout(() => {
+        setChatMessages(prev => [...prev, { 
+          role: 'passenger', 
+          text: passengerReply, 
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+        }]);
+      }, 1000);
+    } catch (error) {
+      console.error("Chat error:", error);
+    }
+  };
+
+  const handleSOS = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const sosData = { 
+        type: 'sos', 
+        userId: user.id,
+        location: `${currentLocation.lat}, ${currentLocation.lng}`,
+        tripData: activeTrip ? {
+          origin: activeTrip.origin,
+          destination: activeTrip.destination,
+          passenger: activeTrip.passenger
+        } : null,
+        timestamp: new Date().toISOString()
+      };
+      
+      wsRef.current.send(JSON.stringify(sosData));
+      setSosSent(true);
+      setTimeout(() => setSosSent(false), 5000);
+    } else {
+      alert("Connection lost. Please try calling emergency services directly.");
+    }
+  };
+
   const handleCompleteTrip = () => {
     setShowCompletionModal(true);
   };
 
-  const confirmCompletion = () => {
+  const confirmCompletion = async () => {
     if (passengerRating === 0) return alert("Please rate the passenger");
     
     const fare = activeTrip?.fare || 0;
     const endTime = new Date().toISOString();
+    const distance = (Math.random() * 5 + 2).toFixed(2) + ' km';
+    const safetyScore = safetyData.score;
     
     // Log trip metrics
     const tripLog = {
@@ -336,29 +433,60 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
       startTime: tripStartTime,
       endTime: endTime,
       fare: fare,
-      distance: (Math.random() * 5 + 2).toFixed(2) + ' km', // Simulated distance
-      safetyScore: safetyData.score,
+      distance: distance,
+      safetyScore: safetyScore,
       routeAdherence: shiftMetrics.route_adherence
     };
     
     console.log("Logging Trip Metrics:", tripLog);
     
-    // Save to local storage for analysis
-    const existingLogs = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
-    localStorage.setItem('keke_trip_logs', JSON.stringify([...existingLogs, tripLog]));
+    try {
+      // 1. Save to backend
+      await fetch('/api/trips/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip_id: activeTrip?.id,
+          end_lat: currentLocation.lat,
+          end_lng: currentLocation.lng,
+          fare: fare,
+          distance: distance,
+          safety_score: safetyScore
+        })
+      });
 
-    setEarnings(prev => prev + fare);
-    setShiftEarnings(prev => prev + fare);
-    setShiftTrips(prev => prev + 1);
-    setShiftMetrics(prev => ({ ...prev, trips_completed: prev.trips_completed + 1 }));
-    setActiveTrip(null);
-    setTripProgress(0);
-    setRouteUpdate(null);
-    setSelectedRoute(null);
-    setAnomalyWarning(null);
-    setShowCompletionModal(false);
-    setPassengerRating(0);
-    alert("Trip completed successfully! Earnings updated.");
+      // 2. Save to local storage for analysis (keep last 50 trips)
+      const existingLogs = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
+      const updatedLogs = [tripLog, ...existingLogs].slice(0, 50);
+      localStorage.setItem('keke_trip_logs', JSON.stringify(updatedLogs));
+
+      setEarnings(prev => prev + fare);
+      setShiftEarnings(prev => prev + fare);
+      setShiftTrips(prev => prev + 1);
+      setShiftMetrics(prev => ({ ...prev, trips_completed: prev.trips_completed + 1 }));
+      setActiveTrip(null);
+      setTripProgress(0);
+      setRouteUpdate(null);
+      setSelectedRoute(null);
+      setAnomalyWarning(null);
+      setShowCompletionModal(false);
+      setPassengerRating(0);
+      alert("Trip completed successfully! Metrics logged and earnings updated.");
+    } catch (error) {
+      console.error("Error completing trip:", error);
+      alert("Failed to log trip metrics to server, but saved locally.");
+      
+      // Fallback: still update local state if backend fails
+      const existingLogs = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
+      const updatedLogs = [tripLog, ...existingLogs].slice(0, 50);
+      localStorage.setItem('keke_trip_logs', JSON.stringify(updatedLogs));
+      
+      setEarnings(prev => prev + fare);
+      setShiftEarnings(prev => prev + fare);
+      setShiftTrips(prev => prev + 1);
+      setActiveTrip(null);
+      setShowCompletionModal(false);
+    }
   };
   const acceptTrip = async (passengerData?: any) => {
     setIsOptimizing(true);
@@ -525,7 +653,44 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           </AnimatePresence>
         </div>
       ) : (
-        <div className="grid md:grid-cols-3 gap-8">
+        <div className="space-y-6">
+          {/* Driver Profile Header */}
+          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-16 h-16 rounded-2xl bg-slate-100 overflow-hidden border-2 border-white shadow-sm">
+                <img 
+                  src={`https://picsum.photos/seed/${user.id}/200/200`} 
+                  alt="Driver" 
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-bold text-slate-900">{user.name}</h2>
+                  {user.face_verified ? (
+                    <div className="flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full text-[10px] font-bold">
+                      <CheckCircle2 size={12} /> VERIFIED
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-[10px] font-bold">
+                      <Clock size={12} /> VERIFICATION PENDING
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 font-medium uppercase tracking-wider mt-0.5">KekeLink Certified Driver</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-xs font-bold text-slate-400 uppercase mb-1">Safety Rating</p>
+              <div className="flex items-center gap-1 text-emerald-600 font-bold">
+                <Star size={16} fill="currentColor" />
+                <span className="text-xl">4.9</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-8">
           {/* Main Stats */}
           <div className="md:col-span-2 space-y-6">
             {/* Nearby Keke Network Map */}
@@ -557,6 +722,78 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                   className="w-full h-full object-cover opacity-40 grayscale"
                   referrerPolicy="no-referrer"
                 />
+                
+                {/* Route Visualization */}
+                {detailedRoute && (
+                  <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <motion.path
+                      d={`M ${50 + (currentLocation.lng - 8.5920) * 2000} ${40 + (currentLocation.lat - 12.0022) * 2000} ${detailedRoute.waypoints.map((w: any, i: number) => `L ${50 + (currentLocation.lng + w.lng_offset - 8.5920) * 2000} ${40 + (currentLocation.lat + w.lat_offset - 12.0022) * 2000}`).join(' ')}`}
+                      fill="none"
+                      stroke="#3b82f6"
+                      strokeWidth="2"
+                      strokeDasharray="4 2"
+                      initial={{ pathLength: 0 }}
+                      animate={{ pathLength: 1 }}
+                      transition={{ duration: 2, ease: "easeInOut" }}
+                    />
+                  </svg>
+                )}
+
+                {/* Waypoints */}
+                {detailedRoute?.waypoints.map((wp: any, idx: number) => (
+                  <motion.div
+                    key={idx}
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    transition={{ delay: idx * 0.2 }}
+                    className="absolute z-10"
+                    style={{ 
+                      top: `${40 + (currentLocation.lat + wp.lat_offset - 12.0022) * 2000}%`, 
+                      left: `${50 + (currentLocation.lng + wp.lng_offset - 8.5920) * 2000}%` 
+                    }}
+                  >
+                    <div className="relative group">
+                      <div className={`p-1 rounded-full shadow-lg border-2 border-white ${
+                        wp.traffic_level === 'heavy' ? 'bg-red-500' : wp.traffic_level === 'moderate' ? 'bg-amber-500' : 'bg-emerald-500'
+                      }`}>
+                        <div className="w-2 h-2 rounded-full bg-white" />
+                      </div>
+                      
+                      {/* Waypoint Tooltip */}
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-white p-2 rounded-xl shadow-2xl border border-slate-100 z-30">
+                        <p className="text-[10px] font-bold text-slate-900">{wp.name}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[8px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                            <Clock size={8} /> {wp.eta}
+                          </span>
+                          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full uppercase ${
+                            wp.traffic_level === 'heavy' ? 'bg-red-100 text-red-600' : wp.traffic_level === 'moderate' ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'
+                          }`}>
+                            {wp.traffic_level}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+
+                {/* Destination Marker */}
+                {activeTrip && detailedRoute?.waypoints && (
+                  <motion.div
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className="absolute z-10"
+                    style={{ 
+                      top: `${40 + (currentLocation.lat + detailedRoute.waypoints[detailedRoute.waypoints.length-1].lat_offset - 12.0022) * 2000}%`, 
+                      left: `${50 + (currentLocation.lng + detailedRoute.waypoints[detailedRoute.waypoints.length-1].lng_offset - 8.5920) * 2000}%` 
+                    }}
+                  >
+                    <div className="bg-red-600 text-white p-2 rounded-full shadow-lg border-2 border-white">
+                      <MapPin size={16} />
+                    </div>
+                  </motion.div>
+                )}
+
                 {/* Simulated Keke Markers */}
                 {nearbyKekes.map((keke) => {
                   const status = keke.status || 'Available';
@@ -618,8 +855,11 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
               <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
                 <p className="text-xs font-bold text-slate-400 uppercase mb-1">Today's Earnings</p>
                 <p className="text-3xl font-bold text-slate-900">₦{earnings.toLocaleString()}</p>
-                <div className="flex items-center gap-1 text-emerald-600 text-xs font-bold mt-2">
-                  <TrendingUp size={14} /> +12% from yesterday
+                <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center gap-1 text-emerald-600 text-xs font-bold">
+                    <TrendingUp size={14} /> +12%
+                  </div>
+                  <span className="text-[8px] text-slate-400 uppercase font-bold">Auto-Logged</span>
                 </div>
               </div>
               <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
@@ -668,6 +908,15 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                     </div>
                   </div>
 
+                  <div className="flex gap-2 mb-4">
+                    <button 
+                      onClick={() => setIsChatOpen(true)}
+                      className="flex-1 bg-white border border-slate-200 text-slate-700 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-50 transition-all"
+                    >
+                      <MessageCircle size={14} className="text-emerald-600" /> Chat with Passenger
+                    </button>
+                  </div>
+
                   {passengerStatus && (
                     <motion.div 
                       initial={{ opacity: 0, y: -10 }}
@@ -688,7 +937,52 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                       <div className="w-2 h-2 rounded-full bg-red-500"></div>
                       <p className="text-slate-600 font-medium">{activeTrip.destination}</p>
                     </div>
+                    <div className="flex items-center gap-3 text-sm">
+                      <Clock size={16} className="text-blue-500" />
+                      <p className="text-slate-600 font-medium">ETA: {detailedRoute?.total_eta || 'Calculating...'}</p>
+                    </div>
                   </div>
+
+                  {/* Detailed Route Info Panel */}
+                  {detailedRoute && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="mt-6 pt-6 border-t border-slate-200"
+                    >
+                      <h4 className="text-xs font-bold text-slate-400 uppercase mb-4 flex items-center gap-2">
+                        <Navigation size={14} /> AI Route Waypoints
+                      </h4>
+                      <div className="space-y-4">
+                        {detailedRoute.waypoints.map((wp: any, idx: number) => (
+                          <div key={idx} className="flex items-start gap-3 relative">
+                            {idx < detailedRoute.waypoints.length - 1 && (
+                              <div className="absolute left-1.5 top-4 bottom-0 w-0.5 bg-slate-100" />
+                            )}
+                            <div className={`w-3 h-3 rounded-full mt-1 border-2 border-white shadow-sm ${
+                              wp.traffic_level === 'heavy' ? 'bg-red-500' : wp.traffic_level === 'moderate' ? 'bg-amber-500' : 'bg-emerald-500'
+                            }`} />
+                            <div className="flex-1">
+                              <div className="flex justify-between items-center">
+                                <p className="text-xs font-bold text-slate-800">{wp.name}</p>
+                                <span className="text-[10px] font-bold text-slate-500">{wp.eta}</span>
+                              </div>
+                              <p className={`text-[10px] uppercase font-bold mt-0.5 ${
+                                wp.traffic_level === 'heavy' ? 'text-red-500' : wp.traffic_level === 'moderate' ? 'text-amber-500' : 'text-emerald-500'
+                              }`}>
+                                {wp.traffic_level} Traffic
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                        <p className="text-[10px] font-bold text-blue-700 flex items-center gap-2">
+                          <Info size={12} /> {detailedRoute.traffic_summary}
+                        </p>
+                      </div>
+                    </motion.div>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -878,61 +1172,102 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
               <button className="w-full mt-4 py-2 bg-emerald-600 rounded-xl text-xs font-bold">Navigate to Hotspot</button>
             </div>
 
-            <div className="bg-white p-6 rounded-3xl border border-slate-100">
-              <h3 className="font-bold mb-4 flex items-center gap-2">
-                <Shield className="text-emerald-600" /> Safety Coaching
+            <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="font-bold flex items-center gap-2 text-slate-900">
+                  <Shield className="text-emerald-600" /> AI Safety Coaching
+                </h3>
                 {isCoachingLoading && <Clock size={14} className="animate-spin text-slate-400" />}
-              </h3>
-              <div className="space-y-3 mb-4">
+              </div>
+
+              {/* Safety Score Gauge (Simplified) */}
+              <div className="relative w-32 h-32 mx-auto mb-8">
+                <svg className="w-full h-full" viewBox="0 0 100 100">
+                  <circle 
+                    cx="50" cy="50" r="45" 
+                    fill="none" stroke="#f1f5f9" strokeWidth="8" 
+                  />
+                  <motion.circle 
+                    cx="50" cy="50" r="45" 
+                    fill="none" stroke={safetyData.score >= 90 ? "#10b981" : safetyData.score >= 70 ? "#f59e0b" : "#ef4444"} 
+                    strokeWidth="8" 
+                    strokeDasharray="283"
+                    initial={{ strokeDashoffset: 283 }}
+                    animate={{ strokeDashoffset: 283 - (283 * safetyData.score) / 100 }}
+                    transition={{ duration: 1.5, ease: "easeOut" }}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-3xl font-black text-slate-900">{safetyData.score}</span>
+                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Safety Index</span>
+                </div>
+              </div>
+
+              <div className="space-y-3 mb-6">
                 {isCoachingLoading ? (
-                  <div className="py-8 text-center">
-                    <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">AI Analyzing Performance...</p>
+                  <div className="py-4 text-center">
+                    <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                    <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Analyzing Patterns...</p>
                   </div>
                 ) : safetyData.tips.length > 0 ? (
                   safetyData.tips.map((tip: string, i: number) => (
                     <motion.div 
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.1 }}
                       key={i} 
-                      className="flex items-start gap-3 bg-emerald-50 p-3 rounded-xl"
+                      className="flex items-start gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 hover:border-emerald-200 transition-colors group"
                     >
-                      <CheckCircle2 className="text-emerald-600 mt-0.5 flex-shrink-0" size={16} />
-                      <p className="text-xs text-emerald-800">{tip}</p>
+                      <div className="w-6 h-6 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0 group-hover:bg-emerald-600 transition-colors">
+                        <CheckCircle2 className="text-emerald-600 group-hover:text-white transition-colors" size={14} />
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed">{tip}</p>
                     </motion.div>
                   ))
                 ) : (
-                  <div className="flex items-start gap-3 bg-slate-50 p-3 rounded-xl">
-                    <AlertCircle className="text-slate-400 mt-0.5" size={16} />
-                    <p className="text-xs text-slate-600">{safetyData.summary}</p>
+                  <div className="flex items-start gap-3 bg-amber-50 p-4 rounded-2xl border border-amber-100">
+                    <AlertCircle className="text-amber-500 mt-0.5 flex-shrink-0" size={16} />
+                    <p className="text-xs text-amber-800 leading-relaxed">{safetyData.summary}</p>
                   </div>
                 )}
               </div>
-              <div className="p-3 bg-slate-50 rounded-2xl mb-4 border border-slate-100">
-                <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Shift Performance</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100">
-                    <p className="text-lg font-bold text-slate-900">{shiftMetrics.trips_completed}</p>
-                    <p className="text-[8px] text-slate-400 font-bold uppercase">Trips</p>
+
+              <div className="p-4 bg-slate-900 rounded-2xl mb-6 shadow-inner">
+                <p className="text-[10px] font-bold text-slate-500 uppercase mb-3 tracking-widest">Shift Performance</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3 bg-slate-800 rounded-xl border border-slate-700">
+                    <p className="text-xl font-bold text-white">{shiftMetrics.trips_completed}</p>
+                    <p className="text-[8px] text-slate-500 font-bold uppercase">Trips</p>
                   </div>
-                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100">
-                    <p className={`text-lg font-bold ${shiftMetrics.anomalies_detected > 0 ? 'text-red-500' : 'text-emerald-500'}`}>
+                  <div className="p-3 bg-slate-800 rounded-xl border border-slate-700">
+                    <p className={`text-xl font-bold ${shiftMetrics.anomalies_detected > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                       {shiftMetrics.anomalies_detected}
                     </p>
-                    <p className="text-[8px] text-slate-400 font-bold uppercase">Anomalies</p>
+                    <p className="text-[8px] text-slate-500 font-bold uppercase">Anomalies</p>
                   </div>
-                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100 col-span-2">
-                    <p className={`text-lg font-bold ${shiftMetrics.route_adherence < 0.9 ? 'text-amber-500' : 'text-emerald-500'}`}>
-                      {Math.round(shiftMetrics.route_adherence * 100)}%
-                    </p>
-                    <p className="text-[8px] text-slate-400 font-bold uppercase">Route Adherence</p>
+                  <div className="p-3 bg-slate-800 rounded-xl border border-slate-700 col-span-2 flex justify-between items-center">
+                    <div>
+                      <p className={`text-xl font-bold ${shiftMetrics.route_adherence < 0.9 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {Math.round(shiftMetrics.route_adherence * 100)}%
+                      </p>
+                      <p className="text-[8px] text-slate-500 font-bold uppercase">Route Adherence</p>
+                    </div>
+                    <div className="w-16 h-1 bg-slate-700 rounded-full overflow-hidden">
+                      <motion.div 
+                        className={`h-full ${shiftMetrics.route_adherence < 0.9 ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                        initial={{ width: 0 }}
+                        animate={{ width: `${shiftMetrics.route_adherence * 100}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
+              
               <button 
                 onClick={() => fetchSafetyCoaching(shiftMetrics)}
-                className="w-full py-2 border-2 border-slate-200 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all"
+                disabled={isCoachingLoading}
+                className="w-full py-3 bg-white border border-slate-200 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-50 hover:border-slate-300 transition-all active:scale-[0.98] disabled:opacity-50"
               >
                 Refresh AI Coaching
               </button>
@@ -946,6 +1281,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             </button>
           </div>
         </div>
+      </div>
       )}
 
       {/* Shift Summary Modal */}
@@ -1016,12 +1352,147 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         )}
       </AnimatePresence>
 
+      {/* Passenger Chat Modal */}
+      <AnimatePresence>
+        {isChatOpen && activeTrip && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ y: 100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 100, opacity: 0 }}
+              className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col h-[80vh] sm:h-[600px]"
+            >
+              {/* Chat Header */}
+              <div className="p-4 bg-emerald-600 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center overflow-hidden">
+                    <img src={`https://picsum.photos/seed/${activeTrip.passenger}/100/100`} alt="Passenger" referrerPolicy="no-referrer" />
+                  </div>
+                  <div>
+                    <p className="font-bold">{activeTrip.passenger}</p>
+                    <p className="text-[10px] opacity-80 uppercase font-bold tracking-wider">Your Passenger</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsChatOpen(false)}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+                {chatMessages.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-8">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                      <MessageCircle size={32} className="text-slate-300" />
+                    </div>
+                    <p className="text-slate-500 text-sm">No messages yet. Say hello to {activeTrip.passenger}!</p>
+                  </div>
+                )}
+                {chatMessages.map((msg, idx) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: msg.role === 'driver' ? 20 : -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={idx} 
+                    className={`flex ${msg.role === 'driver' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[80%] p-3 rounded-2xl shadow-sm ${
+                      msg.role === 'driver' 
+                        ? 'bg-emerald-600 text-white rounded-tr-none' 
+                        : 'bg-white text-slate-800 rounded-tl-none border border-slate-100'
+                    }`}>
+                      <p className="text-sm leading-relaxed">{msg.text}</p>
+                      <p className={`text-[8px] mt-1 font-bold uppercase ${msg.role === 'driver' ? 'text-emerald-100' : 'text-slate-400'}`}>
+                        {msg.time}
+                      </p>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+
+              {/* Chat Input */}
+              <div className="p-4 bg-white border-t border-slate-100">
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    placeholder="Type a message..."
+                    className="flex-1 bg-slate-100 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  />
+                  <button 
+                    onClick={handleSendMessage}
+                    disabled={!chatInput.trim()}
+                    className="bg-emerald-600 text-white p-3 rounded-xl hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:grayscale"
+                  >
+                    <Navigation size={20} className="rotate-90" />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <SafetyReportModal 
         isOpen={isReportModalOpen} 
         onClose={() => setIsReportModalOpen(false)} 
         onSuccess={() => setShiftMetrics(prev => ({ ...prev, incidents_reported: prev.incidents_reported + 1 }))}
         userId={user.id} 
       />
+
+      {/* Floating SOS Button */}
+      {isOnShift && (
+        <motion.button
+          initial={{ scale: 0, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={handleSOS}
+          className="fixed bottom-6 right-6 z-40 w-16 h-16 bg-red-600 text-white rounded-full shadow-2xl flex items-center justify-center hover:bg-red-700 transition-colors border-4 border-white"
+        >
+          <AlertTriangle size={32} className="animate-pulse" />
+          <span className="absolute -top-2 -right-2 bg-white text-red-600 text-[10px] font-black px-2 py-1 rounded-full shadow-sm border border-red-100">SOS</span>
+        </motion.button>
+      )}
+
+      {/* SOS Confirmation Overlay */}
+      <AnimatePresence>
+        {sosSent && (
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-red-600/90 backdrop-blur-sm"
+          >
+            <div className="bg-white p-8 rounded-3xl shadow-2xl text-center max-w-sm">
+              <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                <AlertTriangle className="text-red-600 animate-pulse" size={40} />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">SOS ALERT SENT</h2>
+              <p className="text-slate-600 mb-6">Nearby drivers, community leaders, and emergency services have been notified of your location and trip details.</p>
+              <div className="flex items-center gap-2 justify-center text-emerald-600 font-bold">
+                <CheckCircle2 size={20} />
+                <span>Tracking Active</span>
+              </div>
+              <button 
+                onClick={() => setSosSent(false)}
+                className="mt-8 w-full py-3 bg-slate-900 text-white rounded-xl font-bold"
+              >
+                I am safe now
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Trip Completion Modal */}
       <AnimatePresence>

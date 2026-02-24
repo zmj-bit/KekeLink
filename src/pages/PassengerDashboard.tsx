@@ -23,8 +23,21 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   const [feedback, setFeedback] = useState('');
   const [driverStatus, setDriverStatus] = useState<string>('');
   const [useStudentDiscount, setUseStudentDiscount] = useState(false);
+  const [isAiMonitoring, setIsAiMonitoring] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [selectedKeke, setSelectedKeke] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [chatInput, setChatInput] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
   const lastThresholdRef = useRef(0);
+
+  const pushAlert = (alert: any) => {
+    setAlerts(prev => {
+      // Avoid duplicate alerts of the same summary within a short time
+      if (prev.some(a => a.summary === alert.summary)) return prev;
+      return [alert, ...prev].slice(0, 3);
+    });
+  };
 
   useEffect(() => {
     let interval: any;
@@ -90,81 +103,189 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   }, [tripStatus, activeTrip, tripProgress]);
 
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'passenger' }));
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket Error:", error);
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'safety_alert') {
-        setAlerts(prev => [data, ...prev].slice(0, 3));
+    if (tripStatus === 'idle' && activeTrip) {
+      if (driverStatus === 'Driver is nearby') {
+        geminiService.getProactiveAlert({ status: 'nearby', eta: activeTrip.eta })
+          .then(alert => pushAlert({ ...alert, type: 'info', location: 'Nearby' }));
+      } else if (driverStatus === 'Arrived') {
+        pushAlert({
+          type: 'success',
+          category: 'Trip Update',
+          summary: 'Your driver has arrived! Please check the Keke ID before boarding.',
+          location: 'Pickup Point',
+          priority: 'high'
+        });
       }
-      if (data.type === 'nearby_kekes') {
-        setNearbyKekes(data.locations);
-        
-        // Update active trip driver status if they are in the nearby list
-        if (activeTrip && tripStatus === 'idle') {
-          const driver = data.locations.find((k: any) => k.kekeId === activeTrip.keke);
-          if (driver) {
-            // Calculate simple distance (Euclidean for simulation)
-            // Passenger is at (12.0022, 8.5920)
-            const dist = Math.sqrt(
-              Math.pow(driver.lat - 12.0022, 2) + 
-              Math.pow(driver.lng - 8.5920, 2)
-            );
-            
-            // 0.001 degrees is roughly 111 meters
-            if (dist < 0.0005) {
-              setDriverStatus('Arrived');
-              setActiveTrip((prev: any) => prev ? { ...prev, eta: 'Arrived' } : null);
-            } else if (dist < 0.002) {
-              setDriverStatus('Driver is nearby');
-              setActiveTrip((prev: any) => prev ? { ...prev, eta: '1 min' } : null);
-            } else {
-              setDriverStatus('Driver is approaching');
-              const estimatedMins = Math.max(2, Math.ceil(dist * 3000)); // Rough estimate
-              setActiveTrip((prev: any) => prev ? { ...prev, eta: `${estimatedMins} mins` } : null);
-            }
+    }
+  }, [driverStatus, tripStatus, activeTrip?.id]);
+
+  useEffect(() => {
+    let interval: any;
+    if (tripStatus === 'started' && activeTrip && tripProgress < 100) {
+      interval = setInterval(async () => {
+        setIsAiMonitoring(true);
+        try {
+          const tripData = {
+            origin: activeTrip.origin,
+            destination: activeTrip.destination,
+            progress: tripProgress,
+            current_location: "Kano City Corridor"
+          };
+          
+          // Check for anomalies and general proactive updates
+          const [anomaly, proactive] = await Promise.all([
+            geminiService.detectTripAnomaly(tripData),
+            geminiService.getProactiveAlert(tripData)
+          ]);
+
+          if (anomaly.is_anomaly) {
+            pushAlert({
+              type: 'warning',
+              category: 'Route Anomaly',
+              summary: anomaly.reason,
+              location: 'Current Route',
+              priority: anomaly.risk_level
+            });
+          } else if (proactive.priority !== 'low' || Math.random() > 0.7) {
+            // Push proactive AI updates occasionally or if priority is high
+            pushAlert({
+              ...proactive,
+              type: 'info',
+              location: 'On Route'
+            });
           }
+        } catch (e) {
+          console.warn("AI Monitoring Error:", e);
+        } finally {
+          setIsAiMonitoring(false);
         }
+      }, 40000); // Every 40 seconds
+    }
+    return () => clearInterval(interval);
+  }, [tripStatus, activeTrip?.id, tripProgress]);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+    let isComponentMounted = true;
+
+    const connect = () => {
+      if (!isComponentMounted) return;
+      
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (ws) ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'passenger' }));
+        };
+
+        ws.onerror = (error) => {
+          // Suppress noise in dev environment if connection fails
+          if (ws?.readyState !== WebSocket.CLOSED) {
+            console.warn("WebSocket Connection Issue (Expected in some dev environments)");
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'safety_alert') {
+              setAlerts(prev => [data, ...prev].slice(0, 3));
+            }
+            if (data.type === 'anomaly_alert') {
+              pushAlert({
+                type: 'warning',
+                category: 'Driver Alert',
+                summary: `Driver reported: ${data.reason}`,
+                location: 'Current Trip',
+                priority: data.risk_level
+              });
+            }
+            if (data.type === 'nearby_kekes') {
+              setNearbyKekes(data.locations);
+              
+              if (activeTrip && tripStatus === 'idle') {
+                const driver = data.locations.find((k: any) => k.kekeId === activeTrip.keke);
+                if (driver) {
+                  const dist = Math.sqrt(
+                    Math.pow(driver.lat - 12.0022, 2) + 
+                    Math.pow(driver.lng - 8.5920, 2)
+                  );
+                  
+                  if (dist < 0.0005) {
+                    setDriverStatus('Arrived');
+                    setActiveTrip((prev: any) => prev ? { ...prev, eta: 'Arrived' } : null);
+                  } else if (dist < 0.002) {
+                    setDriverStatus('Driver is nearby');
+                    setActiveTrip((prev: any) => prev ? { ...prev, eta: '1 min' } : null);
+                  } else {
+                    setDriverStatus('Driver is approaching');
+                    const estimatedMins = Math.max(2, Math.ceil(dist * 3000));
+                    setActiveTrip((prev: any) => prev ? { ...prev, eta: `${estimatedMins} mins` } : null);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Failed to parse WS message", e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (isComponentMounted) {
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
+      } catch (e) {
+        reconnectTimeout = setTimeout(connect, 5000);
       }
     };
+
+    connect();
 
     return () => {
-      ws.close();
+      isComponentMounted = false;
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       wsRef.current = null;
     };
-  }, [user.id]);
+  }, [user.id, activeTrip?.keke, tripStatus]);
 
   const handleSearch = async () => {
     if (!destination) return alert("Please enter a destination");
+    
+    // Step 1: Fetch pricing if not already available
+    if (!pricingDetails) {
+      setIsSearching(true);
+      setTripStatus('pricing');
+      try {
+        const origin = "Current Location";
+        const currentTime = new Date().toISOString();
+        
+        // Call AI for dynamic pricing
+        const pricing = await geminiService.calculateDynamicPrice(origin, destination, currentTime, 'high');
+        setPricingDetails(pricing);
+      } catch (error) {
+        console.error("Pricing error:", error);
+        alert("Failed to calculate price. Please try again.");
+      } finally {
+        setIsSearching(false);
+        setTripStatus('idle');
+      }
+      return;
+    }
+
+    // Step 2: If we have pricing, proceed to search for a driver (Confirmation)
     setIsSearching(true);
-    setPricingDetails(null);
-    setActiveTrip(null);
-    setTripStatus('pricing');
+    setTripStatus('searching');
     
     try {
-      // Use current location and specific time from request context
       const origin = "Current Location";
-      const currentTime = "2026-02-23T18:49:07-08:00";
       
-      // Call AI for dynamic pricing
-      const pricing = await geminiService.calculateDynamicPrice(origin, destination, currentTime, 'high');
-      setPricingDetails(pricing);
-      
-      // Give user a moment to see the pricing before searching
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      setTripStatus('searching');
-
+      // Simulate finding a driver
       setTimeout(() => {
         setIsSearching(false);
         setTripStatus('idle');
@@ -172,7 +293,7 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
           driver: 'Musa Ibrahim',
           keke: 'KL-2024-089',
           eta: '3 mins',
-          fare: useStudentDiscount ? Math.round(pricing.total_fare * 0.8) : pricing.total_fare,
+          fare: useStudentDiscount ? Math.round(pricingDetails.total_fare * 0.8) : pricingDetails.total_fare,
           rating: 4.8,
           safetyScore: 96,
           origin,
@@ -214,6 +335,33 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
       setTimeout(() => setSosSent(false), 5000);
     } else {
       alert("Connection lost. Please try calling emergency services directly.");
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !activeTrip) return;
+    
+    const userMsg = { role: 'user', text: chatInput, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
+    setChatMessages(prev => [...prev, userMsg]);
+    const currentInput = chatInput;
+    setChatInput('');
+    
+    // Simulate driver response using AI
+    try {
+      const driverReply = await geminiService.chatWithAssistant(
+        currentInput, 
+        `You are a Keke driver named ${activeTrip.driver} in Kano. A passenger just messaged you: "${currentInput}". Respond briefly and professionally in English with a touch of Hausa (e.g., Sannu, Na gode). You are currently driving them to ${activeTrip.destination}.`
+      );
+      
+      setTimeout(() => {
+        setChatMessages(prev => [...prev, { 
+          role: 'driver', 
+          text: driverReply, 
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+        }]);
+      }, 1000);
+    } catch (error) {
+      console.error("Chat error:", error);
     }
   };
 
@@ -319,6 +467,96 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
         )}
       </AnimatePresence>
 
+      {/* Driver Chat Modal */}
+      <AnimatePresence>
+        {isChatOpen && activeTrip && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ y: 100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 100, opacity: 0 }}
+              className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col h-[80vh] sm:h-[600px]"
+            >
+              {/* Chat Header */}
+              <div className="p-4 bg-emerald-600 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center overflow-hidden">
+                    <img src={`https://picsum.photos/seed/${activeTrip.driver}/100/100`} alt="Driver" referrerPolicy="no-referrer" />
+                  </div>
+                  <div>
+                    <p className="font-bold">{activeTrip.driver}</p>
+                    <p className="text-[10px] opacity-80 uppercase font-bold tracking-wider">Your Keke Driver</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsChatOpen(false)}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+                {chatMessages.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-8">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                      <MessageCircle size={32} className="text-slate-300" />
+                    </div>
+                    <p className="text-slate-500 text-sm">No messages yet. Say hello to {activeTrip.driver}!</p>
+                  </div>
+                )}
+                {chatMessages.map((msg, idx) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: msg.role === 'user' ? 20 : -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={idx} 
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[80%] p-3 rounded-2xl shadow-sm ${
+                      msg.role === 'user' 
+                        ? 'bg-emerald-600 text-white rounded-tr-none' 
+                        : 'bg-white text-slate-800 rounded-tl-none border border-slate-100'
+                    }`}>
+                      <p className="text-sm leading-relaxed">{msg.text}</p>
+                      <p className={`text-[8px] mt-1 font-bold uppercase ${msg.role === 'user' ? 'text-emerald-100' : 'text-slate-400'}`}>
+                        {msg.time}
+                      </p>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+
+              {/* Chat Input */}
+              <div className="p-4 bg-white border-t border-slate-100">
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    placeholder="Type a message..."
+                    className="flex-1 bg-slate-100 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  />
+                  <button 
+                    onClick={handleSendMessage}
+                    disabled={!chatInput.trim()}
+                    className="bg-emerald-600 text-white p-3 rounded-xl hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:grayscale"
+                  >
+                    <Navigation size={20} className="rotate-90" />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* SOS Confirmation Overlay */}
       <AnimatePresence>
         {sosSent && (
@@ -357,17 +595,25 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
               initial={{ x: 50, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
               key={idx} 
-              className="bg-red-600 text-white p-4 rounded-2xl shadow-lg flex items-center justify-between"
+              className={`${
+                alert.type === 'warning' ? 'bg-amber-500' : 
+                alert.type === 'success' ? 'bg-emerald-600' : 
+                alert.type === 'info' ? 'bg-blue-600' : 
+                'bg-red-600'
+              } text-white p-4 rounded-2xl shadow-lg flex items-center justify-between border border-white/10`}
             >
               <div className="flex items-center gap-3">
-                <Bell className="animate-bounce" size={20} />
+                {alert.type === 'warning' ? <AlertTriangle size={20} /> : 
+                 alert.type === 'success' ? <CheckCircle size={20} /> :
+                 alert.type === 'info' ? <Info size={20} /> :
+                 <Bell className="animate-bounce" size={20} />}
                 <div>
-                  <p className="text-xs font-bold uppercase">Safety Alert: {alert.category}</p>
-                  <p className="text-sm">{alert.summary} at {alert.location}</p>
+                  <p className="text-[10px] font-bold uppercase opacity-80 tracking-wider">{alert.category || 'Safety Alert'}</p>
+                  <p className="text-sm font-medium">{alert.summary} {alert.location ? `at ${alert.location}` : ''}</p>
                 </div>
               </div>
-              <button onClick={() => setAlerts(prev => prev.filter((_, i) => i !== idx))} className="text-white/60 hover:text-white">
-                <Info size={18} />
+              <button onClick={() => setAlerts(prev => prev.filter((_, i) => i !== idx))} className="text-white/60 hover:text-white p-1">
+                <X size={18} />
               </button>
             </motion.div>
           ))}
@@ -395,8 +641,8 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 referrerPolicy="no-referrer"
               />
                 {/* Simulated Keke Markers */}
-                {nearbyKekes.map((keke, i) => {
-                  const status = i % 3 === 0 ? 'On Trip' : 'Available';
+                {nearbyKekes.map((keke) => {
+                  const status = keke.status || 'Available';
                   return (
                     <motion.div
                       key={keke.driverId}
@@ -407,8 +653,9 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                         top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
                         left: `${50 + (keke.lng - 8.5920) * 2000}%` 
                       }}
+                      onClick={() => setSelectedKeke(keke)}
                     >
-                      <div className={`${status === 'On Trip' ? 'bg-blue-600' : 'bg-emerald-600'} text-white p-2 rounded-full shadow-lg group-hover:scale-110 transition-transform`}>
+                      <div className={`${status === 'On Trip' ? 'bg-blue-600' : status === 'Offline' ? 'bg-slate-400' : 'bg-emerald-600'} text-white p-2 rounded-full shadow-lg group-hover:scale-110 transition-transform`}>
                         <Car size={16} />
                       </div>
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl z-20">
@@ -425,6 +672,59 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                     </motion.div>
                   );
                 })}
+
+                <AnimatePresence>
+                  {selectedKeke && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 20 }}
+                      className="absolute bottom-4 left-4 right-4 bg-white rounded-2xl shadow-2xl p-4 z-30 border border-slate-100"
+                    >
+                      <div className="flex justify-between items-start mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 overflow-hidden">
+                            <img src={`https://picsum.photos/seed/${selectedKeke.driverId}/100/100`} alt="Driver" referrerPolicy="no-referrer" />
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-sm text-slate-900">{selectedKeke.name}</h4>
+                            <p className="text-[10px] text-slate-500">{selectedKeke.kekeId}</p>
+                          </div>
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); setSelectedKeke(null); }} className="p-1 hover:bg-slate-100 rounded-full">
+                          <X size={16} className="text-slate-400" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-600">
+                          <Star size={12} fill="currentColor" /> 4.8
+                        </div>
+                        <div className="flex items-center gap-1 text-[10px] font-bold text-blue-600">
+                          <Shield size={12} /> 96 Safety
+                        </div>
+                        <div className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full uppercase ${
+                          selectedKeke.status === 'On Trip' ? 'bg-blue-100 text-blue-600' : 
+                          selectedKeke.status === 'Offline' ? 'bg-slate-100 text-slate-600' : 
+                          'bg-emerald-100 text-emerald-600'
+                        }`}>
+                          {selectedKeke.status || 'Available'}
+                        </div>
+                      </div>
+                      <button 
+                        disabled={selectedKeke.status === 'On Trip' || selectedKeke.status === 'Offline'}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setKekeId(selectedKeke.kekeId);
+                          setSelectedKeke(null);
+                          if (destination) handleSearch();
+                        }}
+                        className="w-full bg-emerald-600 text-white py-2.5 rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:grayscale"
+                      >
+                        {selectedKeke.status === 'On Trip' ? 'Currently Busy' : 'Request this Keke'}
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               
               {/* User Marker */}
               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
@@ -451,7 +751,10 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                   placeholder="Enter destination..."
                   className="w-full pl-12 pr-4 py-4 rounded-2xl bg-slate-50 border border-slate-100 focus:ring-2 focus:ring-emerald-500 outline-none"
                   value={destination}
-                  onChange={e => setDestination(e.target.value)}
+                  onChange={e => {
+                    setDestination(e.target.value);
+                    setPricingDetails(null);
+                  }}
                 />
               </div>
               <div className="relative">
@@ -514,7 +817,9 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 disabled={isSearching}
                 className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center justify-center gap-2"
               >
-                {tripStatus === 'pricing' ? 'AI Pricing...' : tripStatus === 'searching' ? 'Finding Driver...' : 'Find Secure Keke'}
+                {tripStatus === 'pricing' ? 'AI Pricing...' : 
+                 tripStatus === 'searching' ? 'Finding Driver...' : 
+                 pricingDetails ? 'Confirm & Find Keke' : 'Get Estimated Fare'}
               </button>
             </div>
           </div>
@@ -639,8 +944,15 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
               {tripStatus === 'started' && (
                 <div className="mb-6">
                   <div className="flex justify-between items-center mb-2">
-                    <p className="text-xs font-bold text-slate-500 uppercase">Trip Progress</p>
-                    <p className="text-xs font-bold text-emerald-600">{tripProgress}%</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-bold text-slate-500 uppercase">Trip Progress</p>
+                      {isAiMonitoring && (
+                        <span className="flex items-center gap-1 text-[8px] font-bold text-emerald-600 animate-pulse">
+                          <Shield size={8} /> AI MONITORING ACTIVE
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs font-bold text-emerald-600">{Math.floor(tripProgress)}%</p>
                   </div>
                   <div className="w-full bg-slate-200 h-3 rounded-full overflow-hidden shadow-inner">
                     <motion.div 
@@ -684,7 +996,15 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                       onClick={handleShareSMS}
                       className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-700 transition-all shadow-lg shadow-blue-100"
                     >
-                      <MessageCircle size={20} /> Share Details via SMS
+                      <Share2 size={20} /> Share Details via SMS
+                    </motion.button>
+                    <motion.button 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      onClick={() => setIsChatOpen(true)}
+                      className="w-full bg-white text-slate-700 py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-50 transition-all border-2 border-slate-100"
+                    >
+                      <MessageCircle size={20} className="text-emerald-600" /> Chat with {activeTrip.driver}
                     </motion.button>
                   </div>
                 )}

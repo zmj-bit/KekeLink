@@ -44,6 +44,8 @@ db.exec(`
     start_lng REAL,
     end_lat REAL,
     end_lng REAL,
+    distance TEXT,
+    safety_score INTEGER,
     status TEXT DEFAULT 'pending', -- 'pending', 'active', 'completed', 'cancelled'
     fare REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -178,12 +180,12 @@ async function startServer() {
   });
 
   app.post("/api/trips/complete", (req, res) => {
-    const { trip_id, end_lat, end_lng, fare } = req.body;
+    const { trip_id, end_lat, end_lng, fare, distance, safety_score } = req.body;
     try {
       db.prepare(`
-        UPDATE trips SET end_lat = ?, end_lng = ?, fare = ?, status = 'completed'
+        UPDATE trips SET end_lat = ?, end_lng = ?, fare = ?, distance = ?, safety_score = ?, status = 'completed'
         WHERE id = ?
-      `).run(end_lat, end_lng, fare, trip_id);
+      `).run(end_lat, end_lng, fare, distance, safety_score, trip_id);
       res.json({ success: true });
     } catch (e: any) {
       console.error("Trip complete error:", e);

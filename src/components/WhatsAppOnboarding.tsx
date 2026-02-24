@@ -91,10 +91,28 @@ export const WhatsAppOnboarding = ({ onBack }: { onBack: () => void }) => {
         <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
           <MessageCircle size={24} />
         </div>
-        <div>
+        <div className="flex-1">
           <h3 className="font-bold">KekeLink Onboarding</h3>
           <p className="text-xs text-white/70">Online</p>
         </div>
+        <button 
+          onClick={() => {
+            if (confirm("Clear chat history?")) {
+              localStorage.removeItem('kekelink_onboarding_history');
+              setMessages([
+                {
+                  id: '1',
+                  role: 'model',
+                  text: 'Sannu! Welcome to KekeLink. I am your onboarding assistant. Are you a passenger or a driver?',
+                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }
+              ]);
+            }
+          }}
+          className="text-[10px] bg-white/10 px-2 py-1 rounded hover:bg-white/20 transition-colors"
+        >
+          Clear History
+        </button>
       </div>
 
       {/* Chat Area */}

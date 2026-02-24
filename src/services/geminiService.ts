@@ -232,6 +232,50 @@ export const geminiService = {
     }, "Proceeding smoothly through the city corridors.");
   },
 
+  async getDetailedRoute(origin: string, destination: string, currentLat: number, currentLng: number) {
+    return handleAiCall(async () => {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Generate a detailed route from ${origin} to ${destination} in Kano. Current location: ${currentLat}, ${currentLng}. 
+        Provide 4-5 major waypoints along the route with their relative coordinates (offset from current location) and estimated arrival times based on current traffic.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              waypoints: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    lat_offset: { type: Type.NUMBER, description: "Latitude offset from current location (e.g. 0.001)" },
+                    lng_offset: { type: Type.NUMBER, description: "Longitude offset from current location (e.g. -0.002)" },
+                    eta: { type: Type.STRING, description: "Estimated time to reach this waypoint (e.g. 3 mins)" },
+                    traffic_level: { type: Type.STRING, enum: ["light", "moderate", "heavy"] }
+                  },
+                  required: ["name", "lat_offset", "lng_offset", "eta", "traffic_level"]
+                }
+              },
+              total_eta: { type: Type.STRING },
+              traffic_summary: { type: Type.STRING }
+            },
+            required: ["waypoints", "total_eta", "traffic_summary"]
+          }
+        }
+      });
+      return JSON.parse(response.text || "{}");
+    }, { 
+      waypoints: [
+        { name: "Zoo Road Junction", lat_offset: 0.001, lng_offset: 0.002, eta: "2 mins", traffic_level: "light" },
+        { name: "Sabon Gari Entrance", lat_offset: 0.003, lng_offset: 0.005, eta: "5 mins", traffic_level: "moderate" },
+        { name: "Market Corridor", lat_offset: 0.005, lng_offset: 0.008, eta: "8 mins", traffic_level: "heavy" }
+      ],
+      total_eta: "12 mins",
+      traffic_summary: "Moderate traffic on main corridors."
+    });
+  },
+
   async getSafetyCoaching(driverStats: any) {
     return handleAiCall(async () => {
       const response = await ai.models.generateContent({
@@ -259,5 +303,30 @@ export const geminiService = {
       tips: ["Maintain consistent speed", "Follow designated Keke corridors", "Check tire pressure daily"], 
       summary: "Safety coaching is temporarily limited. Stay alert and follow standard protocols." 
     });
+  },
+
+  async getProactiveAlert(tripData: any) {
+    return handleAiCall(async () => {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Analyze this trip data for a passenger in Kano: ${JSON.stringify(tripData)}. 
+        Generate a proactive, reassuring, and helpful alert message for the passenger.
+        Examples: "Driver is 2 mins away, traffic is clearing", "Slight route deviation detected due to market congestion, don't worry", "Entering a high-traffic area, ETA adjusted".
+        Keep it under 20 words.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              category: { type: Type.STRING },
+              priority: { type: Type.STRING, enum: ["low", "medium", "high"] }
+            },
+            required: ["summary", "category", "priority"]
+          }
+        }
+      });
+      return JSON.parse(response.text || "{}");
+    }, { summary: "Trip is proceeding as planned.", category: "Trip Update", priority: "low" });
   }
 };

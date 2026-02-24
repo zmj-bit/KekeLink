@@ -12,6 +12,9 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
   const [step, setStep] = useState(1);
   const [isVerifyingNIN, setIsVerifyingNIN] = useState(false);
   const [ninVerified, setNinVerified] = useState(false);
+  const [isStudent, setIsStudent] = useState(false);
+  const [isVerifyingStudent, setIsVerifyingStudent] = useState(false);
+  const [studentVerified, setStudentVerified] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
@@ -32,10 +35,23 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
     setNinVerified(true);
   };
 
+  const handleVerifyStudent = async () => {
+    if (!formData.student_id) return;
+    setIsVerifyingStudent(true);
+    // Simulate API call to University Database
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    setIsVerifyingStudent(false);
+    setStudentVerified(true);
+  };
+
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     if (role === 'driver' && !ninVerified) {
       alert("Please verify your NIN before registering.");
+      return;
+    }
+    if (role === 'passenger' && isStudent && !studentVerified) {
+      alert("Please verify your Student ID to claim the discount.");
       return;
     }
     
@@ -185,17 +201,69 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
               )}
 
               {role === 'passenger' && (
-                <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
-                  <input 
-                    type="checkbox" 
-                    id="is_student"
-                    className="w-4 h-4 text-emerald-600 rounded"
-                    onChange={(e) => {
-                      if (e.target.checked) setFormData({...formData, student_id: 'PENDING'});
-                      else setFormData({...formData, student_id: ''});
-                    }}
-                  />
-                  <label htmlFor="is_student" className="text-sm text-slate-600">I am a student (Get 20% discount)</label>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
+                    <input 
+                      type="checkbox" 
+                      id="is_student"
+                      checked={isStudent}
+                      className="w-4 h-4 text-emerald-600 rounded"
+                      onChange={(e) => {
+                        setIsStudent(e.target.checked);
+                        if (!e.target.checked) {
+                          setFormData({...formData, student_id: '', student_expiry: ''});
+                          setStudentVerified(false);
+                        }
+                      }}
+                    />
+                    <label htmlFor="is_student" className="text-sm text-slate-600 font-medium">I am a student (Get 20% discount)</label>
+                  </div>
+
+                  {isStudent && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -10 }} 
+                      animate={{ opacity: 1, y: 0 }} 
+                      className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 space-y-3"
+                    >
+                      <div className="flex items-center gap-2 text-emerald-700 mb-1">
+                        <Landmark size={16} />
+                        <span className="text-xs font-bold uppercase">Student Verification</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <input 
+                          type="text" 
+                          placeholder="Student ID Number"
+                          className={`flex-1 px-4 py-2 text-sm rounded-xl border focus:ring-2 focus:ring-emerald-500 outline-none ${studentVerified ? 'border-emerald-500 bg-white' : 'border-slate-200'}`}
+                          value={formData.student_id}
+                          onChange={e => setFormData({...formData, student_id: e.target.value})}
+                          disabled={studentVerified}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleVerifyStudent}
+                          disabled={isVerifyingStudent || studentVerified || !formData.student_id}
+                          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${studentVerified ? 'bg-emerald-600 text-white' : 'bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50'}`}
+                        >
+                          {isVerifyingStudent ? '...' : studentVerified ? '✓' : 'Verify'}
+                        </button>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">ID Expiry Date</label>
+                        <input 
+                          type="date" 
+                          className="w-full px-4 py-2 text-sm rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none"
+                          value={formData.student_expiry}
+                          onChange={e => setFormData({...formData, student_expiry: e.target.value})}
+                          disabled={studentVerified}
+                        />
+                      </div>
+                      {studentVerified && (
+                        <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1">
+                          <ShieldCheck size={12} /> Verification successful! Discount applied.
+                        </p>
+                      )}
+                    </motion.div>
+                  )}
                 </div>
               )}
 
