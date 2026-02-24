@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X } from 'lucide-react';
+import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X, Car } from 'lucide-react';
 import { geminiService } from '../services/geminiService';
 import { SafetyReportModal } from '../components/SafetyReportModal';
 
@@ -10,6 +10,10 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   const [showFacePrompt, setShowFacePrompt] = useState(false);
   const [faceVerified, setFaceVerified] = useState(false);
   const [activeTrip, setActiveTrip] = useState<any>(null);
+  const activeTripRef = useRef(activeTrip);
+  useEffect(() => {
+    activeTripRef.current = activeTrip;
+  }, [activeTrip]);
   const [suggestedRoutes, setSuggestedRoutes] = useState<any[]>([]);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
@@ -22,33 +26,101 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   const [showCompletionModal, setShowCompletionModal] = useState(false);
   const [passengerRating, setPassengerRating] = useState(0);
   const [earnings, setEarnings] = useState(4500);
-  const wsRef = useRef<WebSocket | null>(null);
+  const [shiftEarnings, setShiftEarnings] = useState(0);
+  const [shiftTrips, setShiftTrips] = useState(0);
+  const [showShiftSummary, setShowShiftSummary] = useState(false);
+  const [passengerStatus, setPassengerStatus] = useState<string | null>(null);
+  const [tripStartTime, setTripStartTime] = useState<string | null>(null);
+  const [nearbyPassengers, setNearbyPassengers] = useState<any[]>([]);
+  const [nearbyKekes, setNearbyKekes] = useState<any[]>([]);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number }>({ lat: 12.0022, lng: 8.5920 });
+  const [locationStatus, setLocationStatus] = useState<'active' | 'error' | 'requesting'>('requesting');
+  const locationRef = useRef(currentLocation);
+  const statusRef = useRef(locationStatus);
 
   useEffect(() => {
-    const fetchSafetyCoaching = async () => {
-      const stats = {
-        trips_completed: 145,
-        route_adherence: 0.96,
-        incidents_reported: 0,
-        verifications_successful: true,
-        last_shift_duration: '8h'
-      };
-      try {
-        const data = await geminiService.getSafetyCoaching(stats);
-        setSafetyData(data);
-      } catch (error) {
-        console.error("Error fetching safety coaching:", error);
-      }
-    };
-    fetchSafetyCoaching();
-  }, []);
+    locationRef.current = currentLocation;
+  }, [currentLocation]);
+
+  useEffect(() => {
+    statusRef.current = locationStatus;
+  }, [locationStatus]);
+
+  const [shiftMetrics, setShiftMetrics] = useState({
+    trips_completed: 145,
+    anomalies_detected: 0,
+    route_adherence: 0.98,
+    incidents_reported: 0
+  });
+  const [isCoachingLoading, setIsCoachingLoading] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const fetchSafetyCoaching = async (metrics: any) => {
+    setIsCoachingLoading(true);
+    try {
+      const data = await geminiService.getSafetyCoaching(metrics);
+      setSafetyData(data);
+    } catch (error) {
+      console.error("Error fetching safety coaching:", error);
+    } finally {
+      setIsCoachingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      fetchSafetyCoaching(shiftMetrics);
+    }, 2000); // Debounce coaching calls
+    return () => clearTimeout(timeout);
+  }, [shiftMetrics.trips_completed, shiftMetrics.anomalies_detected, shiftMetrics.incidents_reported]);
+
+  // Simulate passenger status updates during pickup phase
+  useEffect(() => {
+    let interval: any;
+    if (activeTrip && tripProgress === 0) {
+      const statuses = [
+        'Passenger is walking to pickup point',
+        'Passenger is 50m away',
+        'Passenger is 10m away',
+        'Passenger is ready at pickup point'
+      ];
+      let index = 0;
+      setPassengerStatus(statuses[0]);
+      
+      interval = setInterval(() => {
+        index++;
+        if (index < statuses.length) {
+          setPassengerStatus(statuses[index]);
+        } else {
+          clearInterval(interval);
+        }
+      }, 5000);
+    } else if (!activeTrip || tripProgress > 0) {
+      setPassengerStatus(null);
+    }
+    return () => clearInterval(interval);
+  }, [activeTrip, tripProgress]);
+
+  // Simulate periodic performance updates to trigger dynamic coaching
+  useEffect(() => {
+    if (isOnShift) {
+      const interval = setInterval(() => {
+        // Randomly fluctuate route adherence to simulate real-time performance
+        setShiftMetrics(prev => ({
+          ...prev,
+          route_adherence: Math.max(0.7, Math.min(1, prev.route_adherence + (Math.random() - 0.5) * 0.1))
+        }));
+      }, 60000); // Every minute
+      return () => clearInterval(interval);
+    }
+  }, [isOnShift]);
 
   useEffect(() => {
     let interval: any;
     if (activeTrip && tripProgress > 0 && tripProgress < 100) {
       interval = setInterval(async () => {
         const tripData = {
-          current_location: "Kano City Center",
+          current_location: `${currentLocation.lat}, ${currentLocation.lng}`,
           destination: activeTrip.destination,
           speed: Math.floor(Math.random() * 40) + 10,
           time: new Date().toISOString(),
@@ -59,6 +131,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           const result = await geminiService.detectTripAnomaly(tripData);
           if (result.is_anomaly) {
             setAnomalyWarning(result);
+            setShiftMetrics(prev => ({ ...prev, anomalies_detected: prev.anomalies_detected + 1 }));
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({
                 type: 'anomaly_alert',
@@ -71,9 +144,9 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             setAnomalyWarning(null);
           }
         } catch (error) {
-          console.error("Anomaly detection error:", error);
+          console.warn("Anomaly detection error (likely rate limit):", error);
         }
-      }, 15000);
+      }, 30000); // Increased interval to 30s
     }
     return () => clearInterval(interval);
   }, [activeTrip, tripProgress, user.id]);
@@ -102,27 +175,86 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   useEffect(() => {
     if (isOnShift) {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}`);
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
       wsRef.current = ws;
 
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'driver' }));
       };
 
-      const locationInterval = setInterval(() => {
+      ws.onerror = (error) => {
+        console.error("WebSocket Error:", error);
+      };
+
+      let watchId: number | null = null;
+      let fallbackInterval: any = null;
+
+      const sendLocation = (lat: number, lng: number) => {
         if (ws.readyState === WebSocket.OPEN) {
-          // Simulate random movement around Kano
-          const lat = 12.0022 + (Math.random() - 0.5) * 0.01;
-          const lng = 8.5920 + (Math.random() - 0.5) * 0.01;
           ws.send(JSON.stringify({ 
             type: 'location_update', 
             lat, 
             lng,
             name: user.name,
-            kekeId: 'KL-2024-089' // Mock Keke ID
+            kekeId: 'KL-2024-089', // Mock Keke ID
+            status: statusRef.current === 'error' ? 'Offline' : (activeTripRef.current ? 'On Trip' : 'Available')
           }));
         }
-      }, 3000);
+      };
+
+      if ("geolocation" in navigator) {
+        setLocationStatus('requesting');
+        watchId = navigator.geolocation.watchPosition(
+          (position) => {
+            const { latitude, longitude } = position.coords;
+            setCurrentLocation({ lat: latitude, lng: longitude });
+            setLocationStatus('active');
+            sendLocation(latitude, longitude);
+          },
+          (error) => {
+            if (error.code === 1) {
+              console.warn("Geolocation permission denied. Using fallback.");
+            } else {
+              console.warn("Geolocation issue:", error.message || "Unknown error", `(Code: ${error.code})`);
+            }
+            // Fallback to a central location in Kano if GPS fails (common in preview/dev)
+            const fallbackLat = 12.0022;
+            const fallbackLng = 8.5920;
+            setCurrentLocation({ lat: fallbackLat, lng: fallbackLng });
+            setLocationStatus('active'); // Set to active so the app continues with fallback
+            sendLocation(fallbackLat, fallbackLng);
+          },
+          { enableHighAccuracy: false, maximumAge: 30000, timeout: 15000 }
+        );
+
+        // Fallback interval to ensure periodic updates even if stationary or GPS lost
+        fallbackInterval = setInterval(() => {
+          if (statusRef.current === 'active' || statusRef.current === 'error') {
+            sendLocation(locationRef.current.lat, locationRef.current.lng);
+          }
+        }, 10000);
+      } else {
+        console.warn("Geolocation not supported, using fallback location.");
+        const fallbackLat = 12.0022;
+        const fallbackLng = 8.5920;
+        setCurrentLocation({ lat: fallbackLat, lng: fallbackLng });
+        setLocationStatus('active');
+        sendLocation(fallbackLat, fallbackLng);
+      }
+
+      // Simulate receiving nearby passengers
+      const passengerSimulation = setInterval(() => {
+        if (!activeTrip) {
+          const mockPassengers = [
+            { id: 101, name: 'Zainab Aliyu', origin: 'Bayero University (Old Site)', destination: 'Sabon Gari Market', fare: 600, distance: '0.8km', type: 'Student', isRecommended: true },
+            { id: 102, name: 'Musa Bello', origin: 'Kano State Library', destination: 'Zoo Road', fare: 450, distance: '1.2km', type: 'Regular', isRecommended: false },
+            { id: 103, name: 'Aisha Umar', origin: 'Gidan Makama Museum', destination: 'Kofar Nassarawa', fare: 350, distance: '0.5km', type: 'Regular', isRecommended: false }
+          ];
+          setNearbyPassengers(mockPassengers);
+        } else {
+          setNearbyPassengers([]);
+        }
+      }, 5000);
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -130,17 +262,23 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           setAlerts(prev => [data, ...prev].slice(0, 3));
         }
         if (data.type === 'sos_alert') {
+          const tripInfo = data.tripData ? ` (Trip: ${data.tripData.origin} to ${data.tripData.destination})` : '';
           setAlerts(prev => [{
             category: 'EMERGENCY SOS',
-            summary: `User ${data.userId} needs immediate help at ${data.location}`,
+            summary: `User ${data.userId} needs immediate help at ${data.location}${tripInfo}`,
             location: data.location,
             isSOS: true
           }, ...prev].slice(0, 3));
         }
+        if (data.type === 'nearby_kekes') {
+          setNearbyKekes(data.locations.filter((k: any) => k.driverId !== user.id));
+        }
       };
 
       return () => {
-        clearInterval(locationInterval);
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        if (fallbackInterval) clearInterval(fallbackInterval);
+        clearInterval(passengerSimulation);
         ws.close();
         wsRef.current = null;
       };
@@ -148,6 +286,8 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   }, [isOnShift, user.id, user.name]);
 
   const startShift = () => {
+    setShiftEarnings(0);
+    setShiftTrips(0);
     setShowFacePrompt(true);
   };
 
@@ -186,7 +326,31 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   const confirmCompletion = () => {
     if (passengerRating === 0) return alert("Please rate the passenger");
     
-    setEarnings(prev => prev + (activeTrip?.fare || 0));
+    const fare = activeTrip?.fare || 0;
+    const endTime = new Date().toISOString();
+    
+    // Log trip metrics
+    const tripLog = {
+      tripId: activeTrip?.id,
+      passenger: activeTrip?.passenger,
+      startTime: tripStartTime,
+      endTime: endTime,
+      fare: fare,
+      distance: (Math.random() * 5 + 2).toFixed(2) + ' km', // Simulated distance
+      safetyScore: safetyData.score,
+      routeAdherence: shiftMetrics.route_adherence
+    };
+    
+    console.log("Logging Trip Metrics:", tripLog);
+    
+    // Save to local storage for analysis
+    const existingLogs = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
+    localStorage.setItem('keke_trip_logs', JSON.stringify([...existingLogs, tripLog]));
+
+    setEarnings(prev => prev + fare);
+    setShiftEarnings(prev => prev + fare);
+    setShiftTrips(prev => prev + 1);
+    setShiftMetrics(prev => ({ ...prev, trips_completed: prev.trips_completed + 1 }));
     setActiveTrip(null);
     setTripProgress(0);
     setRouteUpdate(null);
@@ -196,27 +360,46 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     setPassengerRating(0);
     alert("Trip completed successfully! Earnings updated.");
   };
-  const acceptTrip = async () => {
+  const acceptTrip = async (passengerData?: any) => {
     setIsOptimizing(true);
     setTripProgress(0);
     setRouteUpdate(null);
     setSelectedRoute(null);
     setAnomalyWarning(null);
     try {
-      // Simulate trip details
-      const trip = {
+      // Use provided passenger data or default
+      const trip = passengerData || {
         passenger: 'Zainab Aliyu',
+        passengerId: 101,
         origin: 'Bayero University (Old Site)',
         destination: 'Sabon Gari Market',
         fare: 600
       };
-      setActiveTrip(trip);
+
+      // 1. Start trip in backend
+      const response = await fetch('/api/trips/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          passenger_id: trip.passengerId,
+          driver_id: user.id,
+          keke_id: 1, // Mock Keke ID
+          start_lat: 12.0022,
+          start_lng: 8.5920
+        })
+      });
       
-      // Get optimized routes from AI
+      const tripResult = await response.json();
+      setActiveTrip({ ...trip, id: tripResult.id });
+      setTripStartTime(new Date().toISOString());
+      setNearbyPassengers([]);
+      
+      // 2. Get optimized routes from AI
       const result = await geminiService.optimizeRoute(trip.origin, trip.destination);
       setSuggestedRoutes(result.routes || []);
     } catch (error) {
-      console.error("Route optimization error:", error);
+      console.error("Trip start error:", error);
+      alert("Failed to start trip. Please try again.");
     } finally {
       setIsOptimizing(false);
     }
@@ -345,6 +528,92 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         <div className="grid md:grid-cols-3 gap-8">
           {/* Main Stats */}
           <div className="md:col-span-2 space-y-6">
+            {/* Nearby Keke Network Map */}
+            <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                  <Navigation size={18} className="text-emerald-600" /> Nearby Keke Network
+                </h3>
+                <span className="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full animate-pulse">
+                  {nearbyKekes.length} OTHERS ONLINE
+                </span>
+                <div className="flex items-center gap-2 ml-2">
+                  <div className={`w-2 h-2 rounded-full ${locationStatus === 'active' ? 'bg-emerald-500 animate-pulse' : locationStatus === 'error' ? 'bg-red-500' : 'bg-amber-500'}`} />
+                  <span className="text-[10px] font-bold text-slate-500 uppercase">
+                    GPS: {locationStatus}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-slate-100 rounded-full border border-slate-200">
+                  <div className={`w-2 h-2 rounded-full ${locationStatus === 'error' ? 'bg-slate-500' : activeTrip ? 'bg-blue-500' : 'bg-emerald-500'}`} />
+                  <span className="text-[10px] font-bold text-slate-700 uppercase">
+                    Status: {locationStatus === 'error' ? 'Offline' : activeTrip ? 'On Trip' : 'Available'}
+                  </span>
+                </div>
+              </div>
+              <div className="aspect-video bg-slate-100 rounded-2xl relative overflow-hidden border border-slate-200">
+                <img 
+                  src="https://picsum.photos/seed/kanomap/1200/800" 
+                  alt="Map" 
+                  className="w-full h-full object-cover opacity-40 grayscale"
+                  referrerPolicy="no-referrer"
+                />
+                {/* Simulated Keke Markers */}
+                {nearbyKekes.map((keke) => {
+                  const status = keke.status || 'Available';
+                  return (
+                    <motion.div
+                      key={keke.driverId}
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="absolute cursor-pointer group"
+                      style={{ 
+                        top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
+                        left: `${50 + (keke.lng - 8.5920) * 2000}%` 
+                      }}
+                    >
+                      <div className={`${status === 'On Trip' ? 'bg-blue-600' : status === 'Offline' ? 'bg-slate-400' : 'bg-emerald-600'} text-white p-2 rounded-full shadow-lg group-hover:scale-110 transition-transform`}>
+                        <Car size={16} />
+                      </div>
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl z-20">
+                        <div className="flex flex-col gap-0.5">
+                          <p className="font-bold flex items-center gap-1">
+                            {keke.name}
+                            <span className={`text-[8px] px-1 rounded-sm uppercase ${status === 'On Trip' ? 'bg-blue-500' : status === 'Offline' ? 'bg-slate-500' : 'bg-emerald-500'}`}>
+                              {status}
+                            </span>
+                          </p>
+                          <p className="opacity-70">{keke.kekeId}</p>
+                        </div>
+                      </div>
+                      {/* Status Label next to marker */}
+                      <div className="absolute left-full ml-1 top-1/2 -translate-y-1/2 bg-white/90 backdrop-blur-sm border border-slate-200 px-1.5 py-0.5 rounded text-[8px] font-bold shadow-sm pointer-events-none">
+                        <span className={status === 'On Trip' ? 'text-blue-600' : status === 'Offline' ? 'text-slate-500' : 'text-emerald-600'}>
+                          {status}
+                        </span>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+                
+                {/* Self Marker */}
+                <div 
+                  className="absolute z-20 group"
+                  style={{ 
+                    top: `${40 + (currentLocation.lat - 12.0022) * 2000}%`, 
+                    left: `${50 + (currentLocation.lng - 8.5920) * 2000}%`,
+                    transform: 'translate(-50%, -50%)'
+                  }}
+                >
+                  <div className={`w-5 h-5 ${locationStatus === 'error' ? 'bg-slate-400' : activeTrip ? 'bg-blue-600' : 'bg-emerald-500'} rounded-full border-2 border-white shadow-lg ring-4 ${locationStatus === 'error' ? 'ring-slate-400/20' : activeTrip ? 'ring-blue-500/20' : 'ring-emerald-500/20'} ${locationStatus !== 'error' ? 'animate-pulse' : ''} flex items-center justify-center`}>
+                    <Car size={10} className="text-white" />
+                  </div>
+                  <div className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-2 ${locationStatus === 'error' ? 'bg-slate-600' : activeTrip ? 'bg-blue-600' : 'bg-emerald-600'} text-white text-[8px] font-bold px-1.5 py-0.5 rounded shadow-lg whitespace-nowrap`}>
+                    YOU ({locationStatus === 'error' ? 'OFFLINE' : activeTrip ? 'ON TRIP' : 'AVAILABLE'})
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
                 <p className="text-xs font-bold text-slate-400 uppercase mb-1">Today's Earnings</p>
@@ -371,7 +640,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
 
             <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
               <div className="flex justify-between items-center mb-6">
-                <h3 className="font-bold text-xl">{activeTrip ? 'Current Trip' : 'Active Trip Request'}</h3>
+                <h3 className="font-bold text-xl">{activeTrip ? 'Current Trip' : 'Nearby Passengers'}</h3>
                 <div className="flex gap-2">
                   <button 
                     onClick={() => setIsReportModalOpen(true)}
@@ -379,34 +648,131 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                   >
                     <AlertTriangle size={14} /> Report
                   </button>
-                  {!activeTrip && <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold animate-pulse">NEW</span>}
+                  {!activeTrip && nearbyPassengers.length > 0 && (
+                    <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold animate-pulse">
+                      {nearbyPassengers.length} REQUESTS
+                    </span>
+                  )}
                 </div>
               </div>
               
-              <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 mb-6">
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="w-12 h-12 rounded-full bg-slate-200 overflow-hidden">
-                    <img src="https://picsum.photos/seed/passenger/100/100" alt="Passenger" referrerPolicy="no-referrer" />
-                  </div>
-                  <div>
-                    <p className="font-bold">{activeTrip ? activeTrip.passenger : 'Zainab Aliyu'}</p>
-                    <p className="text-xs text-slate-500">Student • 0.8km away</p>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3 text-sm">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                    <p className="text-slate-600 font-medium">{activeTrip ? activeTrip.origin : 'Bayero University (Old Site)'}</p>
-                  </div>
-                  <div className="flex items-center gap-3 text-sm">
-                    <div className="w-2 h-2 rounded-full bg-red-500"></div>
-                    <p className="text-slate-600 font-medium">{activeTrip ? activeTrip.destination : 'Sabon Gari Market'}</p>
-                  </div>
-                </div>
-              </div>
-
               {activeTrip ? (
-                <div className="space-y-6">
+                <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 mb-6">
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className="w-12 h-12 rounded-full bg-slate-200 overflow-hidden">
+                      <img src="https://picsum.photos/seed/passenger/100/100" alt="Passenger" referrerPolicy="no-referrer" />
+                    </div>
+                    <div>
+                      <p className="font-bold">{activeTrip.passenger}</p>
+                      <p className="text-xs text-slate-500">Active Trip</p>
+                    </div>
+                  </div>
+
+                  {passengerStatus && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl flex items-center gap-3"
+                    >
+                      <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                      <p className="text-xs font-bold text-blue-700">{passengerStatus}</p>
+                    </motion.div>
+                  )}
+
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3 text-sm">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
+                      <p className="text-slate-600 font-medium">{activeTrip.origin}</p>
+                    </div>
+                    <div className="flex items-center gap-3 text-sm">
+                      <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                      <p className="text-slate-600 font-medium">{activeTrip.destination}</p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {nearbyPassengers.length > 0 ? (
+                    nearbyPassengers.map((passenger) => (
+                      <motion.div 
+                        layout
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        key={passenger.id} 
+                        className={`p-6 rounded-2xl border transition-all relative overflow-hidden ${
+                          passenger.isRecommended 
+                            ? 'bg-emerald-50/50 border-emerald-200 ring-1 ring-emerald-500/20' 
+                            : 'bg-slate-50 border-slate-100 hover:border-emerald-200'
+                        }`}
+                      >
+                        {passenger.isRecommended && (
+                          <div className="absolute top-0 right-0 bg-emerald-600 text-white text-[8px] font-bold px-3 py-1 rounded-bl-xl flex items-center gap-1 shadow-sm">
+                            <Shield size={10} /> AI RECOMMENDED
+                          </div>
+                        )}
+                        <div className="flex justify-between items-start mb-4">
+                          <div className="flex items-center gap-4">
+                            <div className={`w-12 h-12 rounded-full overflow-hidden border-2 ${passenger.isRecommended ? 'border-emerald-500' : 'border-slate-200'}`}>
+                              <img src={`https://picsum.photos/seed/${passenger.id}/100/100`} alt="Passenger" referrerPolicy="no-referrer" />
+                            </div>
+                            <div>
+                              <p className="font-bold text-slate-900">{passenger.name}</p>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-bold bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded uppercase tracking-wider">{passenger.type}</span>
+                                <span className="text-[10px] text-slate-500 font-medium">{passenger.distance} away</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xl font-bold text-emerald-600">₦{passenger.fare}</p>
+                            <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Est. Fare</p>
+                          </div>
+                        </div>
+                        <div className="space-y-3 mb-6 relative">
+                          <div className="absolute left-1 top-2 bottom-2 w-0.5 bg-slate-200" />
+                          <div className="flex items-center gap-3 text-sm relative z-10">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500 ring-4 ring-white" />
+                            <p className="text-slate-600 font-medium truncate">{passenger.origin}</p>
+                          </div>
+                          <div className="flex items-center gap-3 text-sm relative z-10">
+                            <div className="w-2 h-2 rounded-full bg-red-500 ring-4 ring-white" />
+                            <p className="text-slate-600 font-medium truncate">{passenger.destination}</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-3">
+                          <button 
+                            onClick={() => acceptTrip({
+                              passenger: passenger.name,
+                              passengerId: passenger.id,
+                              origin: passenger.origin,
+                              destination: passenger.destination,
+                              fare: passenger.fare
+                            })}
+                            className="flex-1 bg-emerald-600 text-white py-3.5 rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-[0.98]"
+                          >
+                            Accept Ride
+                          </button>
+                          <button 
+                            onClick={() => setNearbyPassengers(prev => prev.filter(p => p.id !== passenger.id))}
+                            className="px-4 py-3.5 bg-white text-slate-400 rounded-xl font-bold hover:bg-slate-100 hover:text-slate-600 transition-all border border-slate-100"
+                          >
+                            Ignore
+                          </button>
+                        </div>
+                      </motion.div>
+                    ))
+                  ) : (
+                    <div className="text-center py-12 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                      <Clock size={48} className="mx-auto text-slate-300 mb-4 animate-pulse" />
+                      <p className="text-slate-500 font-medium">Waiting for nearby requests...</p>
+                      <p className="text-xs text-slate-400 mt-1">Stay in high-demand areas to get more rides.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {activeTrip && (
+                <div className="space-y-6 mt-6">
                   {/* Real-time Progress Bar */}
                   {tripProgress > 0 && (
                     <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
@@ -488,18 +854,6 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                     </button>
                   )}
                 </div>
-              ) : (
-                <div className="flex gap-4">
-                  <button 
-                    onClick={acceptTrip}
-                    className="flex-1 bg-emerald-600 text-white py-4 rounded-xl font-bold hover:bg-emerald-700 transition-all"
-                  >
-                    Accept Trip (₦600)
-                  </button>
-                  <button className="flex-1 bg-slate-100 text-slate-600 py-4 rounded-xl font-bold hover:bg-slate-200 transition-all">
-                    Decline
-                  </button>
-                </div>
               )}
             </div>
           </div>
@@ -527,14 +881,26 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             <div className="bg-white p-6 rounded-3xl border border-slate-100">
               <h3 className="font-bold mb-4 flex items-center gap-2">
                 <Shield className="text-emerald-600" /> Safety Coaching
+                {isCoachingLoading && <Clock size={14} className="animate-spin text-slate-400" />}
               </h3>
               <div className="space-y-3 mb-4">
-                {safetyData.tips.length > 0 ? (
+                {isCoachingLoading ? (
+                  <div className="py-8 text-center">
+                    <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">AI Analyzing Performance...</p>
+                  </div>
+                ) : safetyData.tips.length > 0 ? (
                   safetyData.tips.map((tip: string, i: number) => (
-                    <div key={i} className="flex items-start gap-3 bg-emerald-50 p-3 rounded-xl">
+                    <motion.div 
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: i * 0.1 }}
+                      key={i} 
+                      className="flex items-start gap-3 bg-emerald-50 p-3 rounded-xl"
+                    >
                       <CheckCircle2 className="text-emerald-600 mt-0.5 flex-shrink-0" size={16} />
                       <p className="text-xs text-emerald-800">{tip}</p>
-                    </div>
+                    </motion.div>
                   ))
                 ) : (
                   <div className="flex items-start gap-3 bg-slate-50 p-3 rounded-xl">
@@ -543,13 +909,37 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                   </div>
                 )}
               </div>
-              <button className="w-full py-2 border-2 border-slate-200 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all">
-                View Detailed Report
+              <div className="p-3 bg-slate-50 rounded-2xl mb-4 border border-slate-100">
+                <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Shift Performance</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100">
+                    <p className="text-lg font-bold text-slate-900">{shiftMetrics.trips_completed}</p>
+                    <p className="text-[8px] text-slate-400 font-bold uppercase">Trips</p>
+                  </div>
+                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100">
+                    <p className={`text-lg font-bold ${shiftMetrics.anomalies_detected > 0 ? 'text-red-500' : 'text-emerald-500'}`}>
+                      {shiftMetrics.anomalies_detected}
+                    </p>
+                    <p className="text-[8px] text-slate-400 font-bold uppercase">Anomalies</p>
+                  </div>
+                  <div className="text-center p-2 bg-white rounded-xl border border-slate-100 col-span-2">
+                    <p className={`text-lg font-bold ${shiftMetrics.route_adherence < 0.9 ? 'text-amber-500' : 'text-emerald-500'}`}>
+                      {Math.round(shiftMetrics.route_adherence * 100)}%
+                    </p>
+                    <p className="text-[8px] text-slate-400 font-bold uppercase">Route Adherence</p>
+                  </div>
+                </div>
+              </div>
+              <button 
+                onClick={() => fetchSafetyCoaching(shiftMetrics)}
+                className="w-full py-2 border-2 border-slate-200 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all"
+              >
+                Refresh AI Coaching
               </button>
             </div>
 
             <button 
-              onClick={() => setIsOnShift(false)}
+              onClick={() => setShowShiftSummary(true)}
               className="w-full bg-red-50 text-red-600 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-100 transition-all"
             >
               <Clock size={20} /> End Shift
@@ -558,9 +948,78 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         </div>
       )}
 
+      {/* Shift Summary Modal */}
+      <AnimatePresence>
+        {showShiftSummary && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl text-center"
+            >
+              <div className="w-20 h-20 rounded-full bg-emerald-100 mx-auto mb-6 flex items-center justify-center">
+                <TrendingUp className="text-emerald-600 w-10 h-10" />
+              </div>
+              <h2 className="text-2xl font-bold mb-2">Shift Summary</h2>
+              <p className="text-slate-500 mb-6">Great work today! Here's how you did.</p>
+              
+              <div className="grid grid-cols-2 gap-4 mb-8">
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Shift Earnings</p>
+                  <p className="text-2xl font-bold text-emerald-600">₦{shiftEarnings.toLocaleString()}</p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Trips Completed</p>
+                  <p className="text-2xl font-bold text-slate-900">{shiftTrips}</p>
+                </div>
+              </div>
+
+              <div className="space-y-3 mb-8">
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-slate-500">Safety Score maintained</span>
+                  <span className="font-bold text-emerald-600">{safetyData.score}%</span>
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-slate-500">Anomalies detected</span>
+                  <span className={`font-bold ${shiftMetrics.anomalies_detected > 0 ? 'text-red-500' : 'text-slate-900'}`}>
+                    {shiftMetrics.anomalies_detected}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-slate-500">Route Adherence</span>
+                  <span className={`font-bold ${shiftMetrics.route_adherence < 0.9 ? 'text-amber-500' : 'text-emerald-500'}`}>
+                    {Math.round(shiftMetrics.route_adherence * 100)}%
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-slate-500">Incidents Reported</span>
+                  <span className="font-bold text-slate-900">{shiftMetrics.incidents_reported}</span>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => {
+                  setShowShiftSummary(false);
+                  setIsOnShift(false);
+                }}
+                className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg"
+              >
+                Close & Go Offline
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <SafetyReportModal 
         isOpen={isReportModalOpen} 
         onClose={() => setIsReportModalOpen(false)} 
+        onSuccess={() => setShiftMetrics(prev => ({ ...prev, incidents_reported: prev.incidents_reported + 1 }))}
         userId={user.id} 
       />
 
@@ -582,23 +1041,35 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                 <img src="https://picsum.photos/seed/passenger/200/200" alt="Passenger" referrerPolicy="no-referrer" />
               </div>
               <h2 className="text-2xl font-bold mb-2">Trip Summary</h2>
-              <div className="bg-slate-50 p-4 rounded-2xl mb-6">
-                <p className="text-xs font-bold text-slate-400 uppercase mb-1">Total Fare</p>
-                <p className="text-3xl font-bold text-emerald-600">₦{activeTrip.fare}</p>
+              <div className="bg-slate-50 p-6 rounded-2xl mb-6 border border-slate-100">
+                <div className="flex justify-between items-center mb-4">
+                  <p className="text-xs font-bold text-slate-400 uppercase">Trip Fare</p>
+                  <p className="text-3xl font-bold text-emerald-600">₦{activeTrip.fare}</p>
+                </div>
+                <div className="space-y-2 border-t border-slate-200 pt-4">
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    <p className="truncate">{activeTrip.origin}</p>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    <p className="truncate">{activeTrip.destination}</p>
+                  </div>
+                </div>
               </div>
               
-              <p className="text-slate-500 mb-4">How was your experience with {activeTrip.passenger}?</p>
+              <p className="text-slate-600 font-medium mb-4">Rate your experience with {activeTrip.passenger}</p>
               
-              <div className="flex justify-center gap-2 mb-8">
+              <div className="flex justify-center gap-3 mb-8">
                 {[1, 2, 3, 4, 5].map((star) => (
                   <button
                     key={star}
                     onClick={() => setPassengerRating(star)}
-                    className="p-1 transition-transform hover:scale-110"
+                    className="p-1 transition-all hover:scale-125 active:scale-95"
                   >
                     <Star 
-                      size={32} 
-                      className={star <= passengerRating ? "text-yellow-400 fill-yellow-400" : "text-slate-200"} 
+                      size={36} 
+                      className={star <= passengerRating ? "text-yellow-400 fill-yellow-400 drop-shadow-sm" : "text-slate-200"} 
                     />
                   </button>
                 ))}
@@ -607,15 +1078,16 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
               <div className="flex gap-4">
                 <button 
                   onClick={() => setShowCompletionModal(false)}
-                  className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-slate-50 transition-all"
+                  className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-slate-50 transition-all border border-transparent hover:border-slate-200"
                 >
-                  Back
+                  Cancel
                 </button>
                 <button 
                   onClick={confirmCompletion}
-                  className="flex-1 bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                  disabled={passengerRating === 0}
+                  className="flex-1 bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed"
                 >
-                  Confirm & Finish
+                  Finalize Trip
                 </button>
               </div>
             </motion.div>

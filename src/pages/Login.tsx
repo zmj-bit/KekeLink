@@ -38,15 +38,33 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
       alert("Please verify your NIN before registering.");
       return;
     }
-    // In a real app, we'd call the API here
-    const mockUser = {
-      id: Math.floor(Math.random() * 1000),
-      role,
-      name: formData.name || 'Guest User',
-      phone: formData.phone || '08000000000',
-      is_verified: role === 'passenger' ? true : ninVerified,
-    };
-    onLogin(mockUser);
+    
+    try {
+      const response = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          role,
+          ...formData,
+          photo_url: `https://picsum.photos/seed/${formData.phone}/200/200`
+        })
+      });
+      
+      const result = await response.json();
+      if (result.success) {
+        onLogin({
+          id: result.id,
+          role,
+          ...formData,
+          is_verified: role === 'passenger' ? true : ninVerified,
+        });
+      } else {
+        alert("Registration failed: " + result.error);
+      }
+    } catch (error) {
+      console.error("Registration error:", error);
+      alert("An error occurred during registration. Please try again.");
+    }
   };
 
   return (
@@ -138,6 +156,30 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
                     <button type="button" className="flex items-center justify-center gap-2 p-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 hover:border-emerald-300 hover:text-emerald-600 transition-all">
                       <Upload size={18} /> <span className="text-xs font-bold">Upload NIN</span>
                     </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Residential Address</label>
+                      <textarea 
+                        required
+                        rows={2}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none resize-none"
+                        value={formData.address}
+                        onChange={e => setFormData({...formData, address: e.target.value})}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Next of Kin (Name & Phone)</label>
+                      <input 
+                        type="text" 
+                        required
+                        placeholder="e.g. John Doe - 08012345678"
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none"
+                        value={formData.next_of_kin}
+                        onChange={e => setFormData({...formData, next_of_kin: e.target.value})}
+                      />
+                    </div>
                   </div>
                 </motion.div>
               )}

@@ -6,10 +6,11 @@ import { geminiService } from '../services/geminiService';
 interface SafetyReportModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onSuccess?: () => void;
   userId: number;
 }
 
-export const SafetyReportModal: React.FC<SafetyReportModalProps> = ({ isOpen, onClose, userId }) => {
+export const SafetyReportModal: React.FC<SafetyReportModalProps> = ({ isOpen, onClose, onSuccess, userId }) => {
   const [reportText, setReportText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -39,6 +40,7 @@ export const SafetyReportModal: React.FC<SafetyReportModalProps> = ({ isOpen, on
       });
 
       setSubmitted(true);
+      if (onSuccess) onSuccess();
       setTimeout(() => {
         setSubmitted(false);
         setReportText('');

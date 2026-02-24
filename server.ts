@@ -64,15 +64,42 @@ db.exec(`
     audio_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- Seed a mock Keke for testing
+  INSERT OR IGNORE INTO kekes (id, unique_number) VALUES (1, 'KL-2024-089');
+
+  -- Seed mock passengers for the demo
+  INSERT OR IGNORE INTO users (id, role, name, phone, is_verified) VALUES 
+  (101, 'passenger', 'Zainab Aliyu', '08000000101', 1),
+  (102, 'passenger', 'Musa Bello', '08000000102', 1),
+  (103, 'passenger', 'Aisha Umar', '08000000103', 1);
+
+  -- Seed some safety reports for the heatmap
+  INSERT OR IGNORE INTO reports (user_id, type, category, risk_level, location, created_at) VALUES 
+  (1, 'safety_report', 'Suspicious Activity', 'high', 'Kano Central Market', datetime('now')),
+  (2, 'safety_report', 'Traffic Violation', 'medium', 'Bayero University Road', datetime('now')),
+  (3, 'safety_report', 'Poor Lighting', 'low', 'Sabon Gari', datetime('now')),
+  (4, 'safety_report', 'Unsafe Driving', 'high', 'Zoo Road', datetime('now')),
+  (5, 'safety_report', 'Crowd Gathering', 'medium', 'Kofar Nassarawa', datetime('now'));
 `);
 
 async function startServer() {
   const app = express();
   const server = createServer(app);
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({ noServer: true });
   const PORT = 3000;
 
   app.use(express.json());
+
+  // Handle WebSocket upgrades manually to avoid conflict with Vite HMR
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url || '', `http://${request.headers.host}`);
+    if (url.pathname === '/ws') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    }
+  });
 
   // API Routes
   app.post("/api/reports/safety", (req, res) => {
@@ -122,7 +149,11 @@ async function startServer() {
       `).run(role, name, phone, nin, address, dob, next_of_kin, photo_url, student_id, student_expiry);
       res.json({ id: info.lastInsertRowid, success: true });
     } catch (e: any) {
-      res.status(400).json({ error: e.message });
+      if (e.message.includes("UNIQUE constraint failed: users.phone")) {
+        res.status(400).json({ error: "This phone number is already registered. Please use a different number or log in." });
+      } else {
+        res.status(400).json({ error: e.message });
+      }
     }
   });
 
@@ -134,25 +165,35 @@ async function startServer() {
 
   app.post("/api/trips/start", (req, res) => {
     const { passenger_id, driver_id, keke_id, start_lat, start_lng } = req.body;
-    const info = db.prepare(`
-      INSERT INTO trips (passenger_id, driver_id, keke_id, start_lat, start_lng, status)
-      VALUES (?, ?, ?, ?, ?, 'active')
-    `).run(passenger_id, driver_id, keke_id, start_lat, start_lng);
-    res.json({ id: info.lastInsertRowid });
+    try {
+      const info = db.prepare(`
+        INSERT INTO trips (passenger_id, driver_id, keke_id, start_lat, start_lng, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
+      `).run(passenger_id, driver_id, keke_id, start_lat, start_lng);
+      res.json({ id: info.lastInsertRowid });
+    } catch (e: any) {
+      console.error("Trip start error:", e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.post("/api/trips/complete", (req, res) => {
     const { trip_id, end_lat, end_lng, fare } = req.body;
-    db.prepare(`
-      UPDATE trips SET end_lat = ?, end_lng = ?, fare = ?, status = 'completed'
-      WHERE id = ?
-    `).run(end_lat, end_lng, fare, trip_id);
-    res.json({ success: true });
+    try {
+      db.prepare(`
+        UPDATE trips SET end_lat = ?, end_lng = ?, fare = ?, status = 'completed'
+        WHERE id = ?
+      `).run(end_lat, end_lng, fare, trip_id);
+      res.json({ success: true });
+    } catch (e: any) {
+      console.error("Trip complete error:", e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // WebSocket for Real-time
   const clients = new Map<number, WebSocket>();
-  const driverLocations = new Map<number, { lat: number, lng: number, name: string, kekeId: string }>();
+  const driverLocations = new Map<number, { lat: number, lng: number, name: string, kekeId: string, status: string }>();
 
   wss.on("connection", (ws) => {
     let userId: number | null = null;
@@ -172,7 +213,8 @@ async function startServer() {
           lat: data.lat, 
           lng: data.lng, 
           name: data.name, 
-          kekeId: data.kekeId 
+          kekeId: data.kekeId,
+          status: data.status || 'Available'
         });
         
         // Broadcast all driver locations to all passengers
@@ -190,10 +232,17 @@ async function startServer() {
 
       if (data.type === "sos" && userId) {
         // Broadcast SOS to admin/gov and nearby drivers
-        console.log(`SOS from user ${userId}`);
+        const timestamp = new Date().toISOString();
+        console.log(`SOS from user ${userId} at ${timestamp}`);
         wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: "sos_alert", userId, location: data.location }));
+            client.send(JSON.stringify({ 
+              type: "sos_alert", 
+              userId, 
+              location: data.location,
+              tripData: data.tripData,
+              timestamp 
+            }));
           }
         });
       }

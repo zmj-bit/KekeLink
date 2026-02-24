@@ -1,10 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Map, Shield, Users, AlertTriangle, BarChart3, Landmark, Search, Filter, Info } from 'lucide-react';
+import { SOSAlertList } from '../components/SOSAlertList';
+import { Map, Shield, Users, AlertTriangle, BarChart3, Landmark, Search, Filter, Info, MapPin } from 'lucide-react';
 
 export const AdminDashboard = () => {
   const [hotspots, setHotspots] = useState<any[]>([]);
-  const [sosAlerts, setSosAlerts] = useState<any[]>([]);
+  const [sosAlerts, setSosAlerts] = useState<any[]>([
+    { userId: 102, location: 'Kano Central Market', timestamp: new Date(Date.now() - 1000 * 60 * 5).toISOString(), status: 'pending' },
+    { userId: 45, location: 'Bayero University Road', timestamp: new Date(Date.now() - 1000 * 60 * 12).toISOString(), status: 'pending' }
+  ]);
+  const [kekeLocations, setKekeLocations] = useState<any[]>([]);
 
   useEffect(() => {
     fetch('/api/reports/hotspots')
@@ -17,12 +22,26 @@ export const AdminDashboard = () => {
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'sos_alert') {
-        setSosAlerts(prev => [data, ...prev].slice(0, 5));
+        setSosAlerts(prev => [{ ...data, status: 'pending' }, ...prev].slice(0, 10));
+      }
+      if (data.type === 'nearby_kekes') {
+        setKekeLocations(data.locations);
       }
     };
 
     return () => ws.close();
   }, []);
+
+  const handleDispatch = (id: string | number) => {
+    setSosAlerts(prev => prev.map(sos => 
+      (sos.userId === id || sos.id === id) ? { ...sos, status: 'dispatched' } : sos
+    ));
+    alert(`Emergency team dispatched to User ${id}`);
+  };
+
+  const handleCall = (id: string | number) => {
+    alert(`Initiating secure call to User ${id}...`);
+  };
 
   return (
     <div className="max-w-7xl mx-auto py-8 px-6">
@@ -67,11 +86,14 @@ export const AdminDashboard = () => {
               <Map className="text-emerald-600" /> Real-time Security Heatmap
             </h3>
             <div className="flex gap-2">
-              <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg">
-                <div className="w-2 h-2 rounded-full bg-red-600 animate-ping"></div> High Risk
+              <span className="flex items-center gap-1 text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg border border-red-100">
+                <div className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse"></div> High Risk
               </span>
-              <span className="flex items-center gap-1 text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">
-                Safe Zone
+              <span className="flex items-center gap-1 text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg border border-amber-100">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-600"></div> Medium Risk
+              </span>
+              <span className="flex items-center gap-1 text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-lg border border-blue-100">
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-600"></div> Low Risk
               </span>
             </div>
           </div>
@@ -83,15 +105,64 @@ export const AdminDashboard = () => {
               referrerPolicy="no-referrer"
             />
             {/* Simulated Heatmap Dots based on real hotspots */}
-            {hotspots.map((h, i) => (
-              <div 
-                key={i}
-                className={`absolute w-12 h-12 rounded-full blur-xl animate-pulse ${h.risk_level === 'high' ? 'bg-red-500/30' : 'bg-yellow-500/20'}`}
+            {hotspots.map((h, i) => {
+              const riskColor = h.risk_level === 'high' ? 'bg-red-500' : h.risk_level === 'medium' ? 'bg-amber-500' : 'bg-blue-500';
+              const riskIntensity = h.risk_level === 'high' ? 'opacity-40 blur-2xl scale-150' : h.risk_level === 'medium' ? 'opacity-30 blur-xl scale-125' : 'opacity-20 blur-lg';
+              
+              return (
+                <React.Fragment key={i}>
+                  {/* Heat Intensity Glow */}
+                  <div 
+                    className={`absolute w-16 h-16 rounded-full animate-pulse ${riskColor} ${riskIntensity}`}
+                    style={{ 
+                      top: `${20 + (i * 17) % 60}%`, 
+                      left: `${15 + (i * 23) % 70}%` 
+                    }}
+                  />
+                  {/* Risk Marker */}
+                  <motion.div
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className="absolute z-20 group cursor-help"
+                    style={{ 
+                      top: `${20 + (i * 17) % 60}%`, 
+                      left: `${15 + (i * 23) % 70}%`,
+                      transform: 'translate(-50%, -50%)'
+                    }}
+                  >
+                    <div className={`p-1.5 rounded-full shadow-lg border-2 border-white ${riskColor} text-white`}>
+                      <AlertTriangle size={12} />
+                    </div>
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl">
+                      <p className="font-bold uppercase">{h.risk_level} RISK</p>
+                      <p className="opacity-70">{h.location}</p>
+                      <p className="opacity-70">{h.category} ({h.count} reports)</p>
+                    </div>
+                  </motion.div>
+                </React.Fragment>
+              );
+            })}
+
+            {/* Real-time Keke Markers */}
+            {kekeLocations.map((keke) => (
+              <motion.div
+                key={keke.driverId}
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                className="absolute z-10 group"
                 style={{ 
-                  top: `${20 + (i * 15) % 60}%`, 
-                  left: `${20 + (i * 25) % 60}%` 
+                  top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
+                  left: `${50 + (keke.lng - 8.5920) * 2000}%` 
                 }}
-              ></div>
+              >
+                <div className="bg-emerald-600 text-white p-1.5 rounded-full shadow-lg border-2 border-white">
+                  <Shield size={12} />
+                </div>
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl">
+                  <p className="font-bold">{keke.name}</p>
+                  <p className="opacity-70">{keke.kekeId}</p>
+                </div>
+              </motion.div>
             ))}
             
             <div className="absolute inset-0 p-6 flex flex-col justify-end">
@@ -111,64 +182,34 @@ export const AdminDashboard = () => {
         </div>
 
         {/* SOS Triage */}
-        <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
-          <h3 className="font-bold text-xl mb-6 flex items-center gap-2 text-red-600">
-            <AlertTriangle /> LIVE SOS TRIAGE
-          </h3>
-          <div className="space-y-4">
-            {sosAlerts.map((sos, i) => (
-              <motion.div 
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                key={`sos-${i}`} 
-                className="p-4 rounded-2xl border-2 border-red-500 bg-red-50 animate-pulse"
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-600 text-white">
-                    CRITICAL SOS
-                  </span>
-                  <span className="text-[10px] text-red-600 font-bold">JUST NOW</span>
-                </div>
-                <p className="text-sm font-bold text-slate-900">User ID: {sos.userId}</p>
-                <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                  <Map size={10} /> {sos.location}
-                </p>
-                <div className="flex gap-2 mt-3">
-                  <button className="flex-1 bg-red-600 text-white py-2 rounded-xl text-xs font-bold shadow-lg shadow-red-100">
-                    Dispatch
-                  </button>
-                  <button className="flex-1 bg-white border border-red-200 text-red-600 py-2 rounded-xl text-xs font-bold">
-                    Call
-                  </button>
-                </div>
-              </motion.div>
-            ))}
-
-            {hotspots.length > 0 ? hotspots.map((sos, i) => (
-              <div key={i} className={`p-4 rounded-2xl border ${sos.risk_level === 'high' ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
-                <div className="flex justify-between items-start mb-2">
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${sos.risk_level === 'high' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
-                    {sos.risk_level.toUpperCase()}
-                  </span>
-                  <span className="text-[10px] text-slate-400 font-bold">Recent</span>
-                </div>
-                <p className="text-sm font-bold text-slate-900">{sos.category}</p>
-                <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                  <Map size={10} /> {sos.location}
-                </p>
-                {sos.risk_level === 'high' && (
-                  <button className="w-full mt-3 bg-red-600 text-white py-2 rounded-xl text-xs font-bold shadow-lg shadow-red-100">
-                    Dispatch Emergency Team
-                  </button>
-                )}
+        <div className="lg:col-span-1">
+          <SOSAlertList 
+            alerts={sosAlerts} 
+            onDispatch={handleDispatch} 
+            onCall={handleCall} 
+          />
+          
+          {hotspots.length > 0 && (
+            <div className="mt-6 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+              <p className="text-[10px] font-bold text-slate-400 uppercase mb-4 tracking-widest">Recent Safety Reports</p>
+              <div className="space-y-3">
+                {hotspots.map((sos, i) => (
+                  <div key={i} className={`p-4 rounded-2xl border ${sos.risk_level === 'high' ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
+                    <div className="flex justify-between items-start mb-2">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${sos.risk_level === 'high' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
+                        {sos.risk_level.toUpperCase()}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-bold">Recent</span>
+                    </div>
+                    <p className="text-sm font-bold text-slate-900">{sos.category}</p>
+                    <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+                      <Map size={10} /> {sos.location}
+                    </p>
+                  </div>
+                ))}
               </div>
-            )) : (
-              <div className="text-center py-8 text-slate-400">
-                <Info size={32} className="mx-auto mb-2 opacity-20" />
-                <p className="text-sm">No recent reports</p>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

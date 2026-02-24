@@ -11,14 +11,29 @@ interface Message {
 }
 
 export const WhatsAppOnboarding = ({ onBack }: { onBack: () => void }) => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      role: 'model',
-      text: 'Sannu! Welcome to KekeLink. I am your onboarding assistant. Are you a passenger or a driver?',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const saved = localStorage.getItem('kekelink_onboarding_history');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse saved history", e);
+      }
     }
-  ]);
+    return [
+      {
+        id: '1',
+        role: 'model',
+        text: 'Sannu! Welcome to KekeLink. I am your onboarding assistant. Are you a passenger or a driver?',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }
+    ];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('kekelink_onboarding_history', JSON.stringify(messages));
+  }, [messages]);
+
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);

@@ -19,14 +19,46 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   const [nearbyKekes, setNearbyKekes] = useState<any[]>([]);
   const [pendingRating, setPendingRating] = useState<any>(null);
   const [ratingValue, setRatingValue] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [feedback, setFeedback] = useState('');
+  const [driverStatus, setDriverStatus] = useState<string>('');
+  const [useStudentDiscount, setUseStudentDiscount] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const lastThresholdRef = useRef(0);
+
+  useEffect(() => {
+    let interval: any;
+    if (activeTrip && tripStatus === 'idle' && (driverStatus === 'Driver is approaching' || driverStatus === 'Driver is nearby')) {
+      interval = setInterval(() => {
+        setActiveTrip((prev: any) => {
+          if (!prev) return null;
+          const currentEta = parseInt(prev.eta);
+          
+          if (isNaN(currentEta) || prev.eta === 'Arrived') {
+            setDriverStatus('Arrived');
+            clearInterval(interval);
+            return prev;
+          }
+
+          if (currentEta <= 1) {
+            setDriverStatus('Driver is nearby');
+            return { ...prev, eta: 'Arrived' };
+          }
+          
+          return { ...prev, eta: `${currentEta - 1} mins` };
+        });
+      }, 6000);
+    }
+    return () => clearInterval(interval);
+  }, [activeTrip, tripStatus, driverStatus]);
 
   useEffect(() => {
     let interval: any;
     if (tripStatus === 'started' && tripProgress < 100) {
+      // Faster, smoother updates for animation
       interval = setInterval(() => {
         setTripProgress(prev => {
-          const next = prev + 2;
+          const next = prev + 0.5; // Smaller increments for smoothness
           if (next >= 100) {
             setPendingRating(activeTrip);
             setTripStatus('idle');
@@ -37,25 +69,37 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
           }
           return next;
         });
-      }, 3000);
+      }, 500); // More frequent updates
     }
     return () => clearInterval(interval);
   }, [tripStatus, tripProgress, activeTrip]);
 
   useEffect(() => {
-    if (tripStatus === 'started' && activeTrip && tripProgress > 0 && tripProgress % 20 === 0 && tripProgress < 100) {
-      geminiService.getRouteUpdate(activeTrip.origin, activeTrip.destination, tripProgress)
+    // Trigger AI route updates every 15% progress
+    const progressThreshold = Math.floor(tripProgress / 15);
+
+    if (tripStatus === 'started' && activeTrip && progressThreshold > lastThresholdRef.current && tripProgress < 100) {
+      lastThresholdRef.current = progressThreshold;
+      geminiService.getRouteUpdate(activeTrip.origin, activeTrip.destination, Math.floor(tripProgress))
         .then(update => setRouteUpdate(update || null));
+    }
+    
+    if (tripStatus !== 'started') {
+      lastThresholdRef.current = 0;
     }
   }, [tripStatus, activeTrip, tripProgress]);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}`);
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
     wsRef.current = ws;
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'auth', userId: user.id, role: 'passenger' }));
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket Error:", error);
     };
 
     ws.onmessage = (event) => {
@@ -65,6 +109,32 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
       }
       if (data.type === 'nearby_kekes') {
         setNearbyKekes(data.locations);
+        
+        // Update active trip driver status if they are in the nearby list
+        if (activeTrip && tripStatus === 'idle') {
+          const driver = data.locations.find((k: any) => k.kekeId === activeTrip.keke);
+          if (driver) {
+            // Calculate simple distance (Euclidean for simulation)
+            // Passenger is at (12.0022, 8.5920)
+            const dist = Math.sqrt(
+              Math.pow(driver.lat - 12.0022, 2) + 
+              Math.pow(driver.lng - 8.5920, 2)
+            );
+            
+            // 0.001 degrees is roughly 111 meters
+            if (dist < 0.0005) {
+              setDriverStatus('Arrived');
+              setActiveTrip((prev: any) => prev ? { ...prev, eta: 'Arrived' } : null);
+            } else if (dist < 0.002) {
+              setDriverStatus('Driver is nearby');
+              setActiveTrip((prev: any) => prev ? { ...prev, eta: '1 min' } : null);
+            } else {
+              setDriverStatus('Driver is approaching');
+              const estimatedMins = Math.max(2, Math.ceil(dist * 3000)); // Rough estimate
+              setActiveTrip((prev: any) => prev ? { ...prev, eta: `${estimatedMins} mins` } : null);
+            }
+          }
+        }
       }
     };
 
@@ -84,11 +154,14 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
     try {
       // Use current location and specific time from request context
       const origin = "Current Location";
-      const currentTime = "2026-02-23T14:18:16-08:00";
+      const currentTime = "2026-02-23T18:49:07-08:00";
       
       // Call AI for dynamic pricing
       const pricing = await geminiService.calculateDynamicPrice(origin, destination, currentTime, 'high');
       setPricingDetails(pricing);
+      
+      // Give user a moment to see the pricing before searching
+      await new Promise(resolve => setTimeout(resolve, 1500));
       
       setTripStatus('searching');
 
@@ -99,12 +172,13 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
           driver: 'Musa Ibrahim',
           keke: 'KL-2024-089',
           eta: '3 mins',
-          fare: user.student_id ? Math.round(pricing.total_fare * 0.8) : pricing.total_fare,
+          fare: useStudentDiscount ? Math.round(pricing.total_fare * 0.8) : pricing.total_fare,
           rating: 4.8,
           safetyScore: 96,
           origin,
           destination
         });
+        setDriverStatus('Driver is approaching');
       }, 2000);
     } catch (error) {
       console.error("Search error:", error);
@@ -117,14 +191,25 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
     setTripStatus('started');
     setTripProgress(0);
     setRouteUpdate(null);
+    setDriverStatus('');
   };
 
   const handleSOS = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ 
+      const sosData = { 
         type: 'sos', 
-        location: 'Current GPS Location' // In a real app, we'd get actual coordinates
-      }));
+        location: 'Current GPS Location',
+        tripData: activeTrip ? {
+          driver: activeTrip.driver,
+          keke: activeTrip.keke,
+          origin: activeTrip.origin,
+          destination: activeTrip.destination,
+          progress: tripProgress
+        } : null,
+        timestamp: new Date().toISOString()
+      };
+      
+      wsRef.current.send(JSON.stringify(sosData));
       setSosSent(true);
       setTimeout(() => setSosSent(false), 5000);
     } else {
@@ -142,19 +227,27 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
         text: message,
         url: window.location.origin
       }).catch(() => {
-        window.location.href = `sms:?body=${encodeURIComponent(message)}`;
+        handleShareSMS();
       });
     } else {
-      window.location.href = `sms:?body=${encodeURIComponent(message)}`;
+      handleShareSMS();
     }
+  };
+
+  const handleShareSMS = () => {
+    if (!activeTrip) return;
+    const message = `I'm on a KekeLink trip! Driver: ${activeTrip.driver}, Keke ID: ${activeTrip.keke}. Destination: ${activeTrip.destination}. Track me on KekeLink.`;
+    window.location.href = `sms:?body=${encodeURIComponent(message)}`;
   };
 
   const submitRating = () => {
     if (ratingValue === 0) return alert("Please select a rating");
     // In a real app, we'd send this to the backend
-    console.log(`Submitted ${ratingValue} stars for ${pendingRating.driver}`);
+    console.log(`Submitted ${ratingValue} stars for ${pendingRating.driver} with feedback: ${feedback}`);
     setPendingRating(null);
     setRatingValue(0);
+    setHoverRating(0);
+    setFeedback('');
     alert("Thank you for your feedback! Your rating helps keep KekeLink safe.");
   };
 
@@ -180,20 +273,31 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
               <h2 className="text-2xl font-bold mb-2">Rate your trip with {pendingRating.driver}</h2>
               <p className="text-slate-500 mb-8">How was your experience? Your feedback helps us maintain high safety standards.</p>
               
-              <div className="flex justify-center gap-2 mb-8">
+              <div className="flex justify-center gap-2 mb-6">
                 {[1, 2, 3, 4, 5].map((star) => (
                   <button
                     key={star}
                     onClick={() => setRatingValue(star)}
-                    onMouseEnter={() => ratingValue === 0 && setRatingValue(star)}
+                    onMouseEnter={() => setHoverRating(star)}
+                    onMouseLeave={() => setHoverRating(0)}
                     className="p-1 transition-transform hover:scale-110"
                   >
                     <Star 
                       size={40} 
-                      className={star <= ratingValue ? "text-yellow-400 fill-yellow-400" : "text-slate-200"} 
+                      className={(hoverRating || ratingValue) >= star ? "text-yellow-400 fill-yellow-400" : "text-slate-200"} 
                     />
                   </button>
                 ))}
+              </div>
+
+              <div className="mb-8">
+                <textarea
+                  placeholder="Tell us about your trip experience (optional)..."
+                  className="w-full p-4 rounded-2xl bg-slate-50 border border-slate-100 focus:ring-2 focus:ring-emerald-500 outline-none text-sm resize-none"
+                  rows={3}
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                />
               </div>
 
               <div className="flex gap-4">
@@ -290,27 +394,37 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 className="w-full h-full object-cover opacity-40 grayscale"
                 referrerPolicy="no-referrer"
               />
-              {/* Simulated Keke Markers */}
-              {nearbyKekes.map((keke, i) => (
-                <motion.div
-                  key={keke.driverId}
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className="absolute cursor-pointer group"
-                  style={{ 
-                    top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
-                    left: `${50 + (keke.lng - 8.5920) * 2000}%` 
-                  }}
-                >
-                  <div className="bg-emerald-600 text-white p-2 rounded-full shadow-lg group-hover:bg-emerald-700 transition-colors">
-                    <Car size={16} />
-                  </div>
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl">
-                    <p className="font-bold">{keke.name}</p>
-                    <p className="opacity-70">{keke.kekeId}</p>
-                  </div>
-                </motion.div>
-              ))}
+                {/* Simulated Keke Markers */}
+                {nearbyKekes.map((keke, i) => {
+                  const status = i % 3 === 0 ? 'On Trip' : 'Available';
+                  return (
+                    <motion.div
+                      key={keke.driverId}
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="absolute cursor-pointer group"
+                      style={{ 
+                        top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
+                        left: `${50 + (keke.lng - 8.5920) * 2000}%` 
+                      }}
+                    >
+                      <div className={`${status === 'On Trip' ? 'bg-blue-600' : 'bg-emerald-600'} text-white p-2 rounded-full shadow-lg group-hover:scale-110 transition-transform`}>
+                        <Car size={16} />
+                      </div>
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl z-20">
+                        <div className="flex flex-col gap-0.5">
+                          <p className="font-bold flex items-center gap-1">
+                            {keke.name}
+                            <span className={`text-[8px] px-1 rounded-sm uppercase ${status === 'On Trip' ? 'bg-blue-500' : 'bg-emerald-500'}`}>
+                              {status}
+                            </span>
+                          </p>
+                          <p className="opacity-70">{keke.kekeId}</p>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
               
               {/* User Marker */}
               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
@@ -363,10 +477,37 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                   <p className="text-xs text-emerald-700">{pricingDetails.explanation}</p>
                   <div className="flex justify-between mt-2 text-xs font-medium text-emerald-900">
                     <span>Base: ₦{pricingDetails.base_fare}</span>
-                    <span>Demand: x{pricingDetails.demand_multiplier}</span>
+                    <span>Multiplier: x{pricingDetails.demand_multiplier}</span>
+                    <span className="font-bold">Total: ₦{useStudentDiscount ? Math.round(pricingDetails.total_fare * 0.8) : pricingDetails.total_fare}</span>
                   </div>
+                  {useStudentDiscount && (
+                    <div className="mt-1 text-[10px] text-emerald-600 font-bold flex items-center gap-1">
+                      <GraduationCap size={12} /> 20% Student Discount Applied
+                    </div>
+                  )}
                 </motion.div>
               )}
+
+              <div className="flex items-center justify-between bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${useStudentDiscount ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                    <GraduationCap size={20} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">Student Discount</p>
+                    <p className="text-[10px] text-slate-500">Apply 20% off with valid ID</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setUseStudentDiscount(!useStudentDiscount)}
+                  className={`w-12 h-6 rounded-full transition-colors relative ${useStudentDiscount ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                >
+                  <motion.div 
+                    animate={{ x: useStudentDiscount ? 24 : 4 }}
+                    className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+                  />
+                </button>
+              </div>
 
               <button 
                 onClick={handleSearch}
@@ -382,21 +523,36 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
             <motion.div 
               initial={{ opacity: 0, y: 20 }} 
               animate={{ opacity: 1, y: 0 }}
-              className="bg-white p-6 rounded-3xl shadow-lg border-2 border-emerald-100"
+              className="bg-white rounded-3xl shadow-lg border-2 border-emerald-100 overflow-hidden"
             >
-              <div className="flex justify-between items-start mb-6">
+              {driverStatus && tripStatus !== 'started' && (
+                <div className={`py-3 px-6 text-center font-bold text-sm uppercase tracking-widest flex items-center justify-center gap-2 ${
+                  driverStatus === 'Arrived' ? 'bg-emerald-600 text-white' :
+                  driverStatus === 'Driver is nearby' ? 'bg-blue-600 text-white animate-pulse' : 
+                  'bg-amber-500 text-white'
+                }`}>
+                  {driverStatus === 'Arrived' ? <CheckCircle size={18} /> : <Clock size={18} />}
+                  {driverStatus}
+                </div>
+              )}
+              <div className="p-6">
+                <div className="flex justify-between items-start mb-6">
                 <div className="flex items-center gap-4">
                   <div className="w-16 h-16 rounded-2xl bg-slate-100 overflow-hidden">
                     <img src="https://picsum.photos/seed/driver/200/200" alt="Driver" referrerPolicy="no-referrer" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-lg">{activeTrip.driver}</h3>
+                    <div className="flex items-center gap-3 mb-1">
+                      <h3 className="font-bold text-lg">{activeTrip.driver}</h3>
+                    </div>
                     <div className="flex flex-col gap-0.5">
-                      <p className="text-sm text-slate-500 flex items-center gap-1">
-                        <Shield size={14} className="text-emerald-600" /> Verified Driver • {activeTrip.rating} ★
-                      </p>
-                      <div className="flex items-center gap-1 text-[10px] font-bold text-blue-600 bg-blue-50 w-fit px-1.5 py-0.5 rounded-md">
-                        <Shield size={10} /> Safety Score: {activeTrip.safetyScore}/100
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm text-slate-500 flex items-center gap-1">
+                          <Shield size={14} className="text-emerald-600" /> Verified Driver • {activeTrip.rating} ★
+                        </p>
+                        <span className="px-2 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded-full flex items-center gap-1 shadow-sm">
+                          <Shield size={10} /> {activeTrip.safetyScore} Safety Score
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -419,18 +575,82 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 </div>
               </div>
 
+              {/* Real-time Trip Map */}
+              <div className="aspect-video bg-slate-100 rounded-2xl relative overflow-hidden border border-slate-200 mb-6">
+                <img 
+                  src="https://picsum.photos/seed/tripmap/1200/800" 
+                  alt="Trip Map" 
+                  className="w-full h-full object-cover opacity-40 grayscale"
+                  referrerPolicy="no-referrer"
+                />
+                
+                {/* Route Path */}
+                <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
+                  <motion.path
+                    d="M 40 120 Q 150 40 260 120"
+                    stroke="#cbd5e1"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    fill="none"
+                    className="opacity-50"
+                  />
+                  <motion.path
+                    d="M 40 120 Q 150 40 260 120"
+                    stroke="#10b981"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    fill="none"
+                    initial={{ pathLength: 0 }}
+                    animate={{ pathLength: tripProgress / 100 }}
+                  />
+                </svg>
+
+                {/* Origin Marker */}
+                <div className="absolute top-[120px] left-[40px] -translate-x-1/2 -translate-y-1/2 text-center">
+                  <div className="w-3 h-3 bg-slate-400 rounded-full border-2 border-white shadow-sm mb-1"></div>
+                  <p className="text-[8px] font-bold text-slate-500 bg-white/80 px-1 rounded uppercase">Pickup</p>
+                </div>
+
+                {/* Destination Marker */}
+                <div className="absolute top-[120px] left-[260px] -translate-x-1/2 -translate-y-1/2 text-center">
+                  <MapPin size={16} className="text-red-500 mb-1" />
+                  <p className="text-[8px] font-bold text-red-600 bg-white/80 px-1 rounded uppercase">Dropoff</p>
+                </div>
+
+                {/* Keke Marker */}
+                {tripStatus === 'started' && (
+                  <motion.div
+                    className="absolute z-10"
+                    style={{ 
+                      offsetPath: "path('M 40 120 Q 150 40 260 120')",
+                      offsetRotate: "auto"
+                    }}
+                    animate={{ 
+                      offsetDistance: `${tripProgress}%`
+                    }}
+                  >
+                    <div className="bg-emerald-600 text-white p-1.5 rounded-full shadow-lg border-2 border-white -translate-x-1/2 -translate-y-1/2">
+                      <Car size={14} />
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+
               {tripStatus === 'started' && (
                 <div className="mb-6">
                   <div className="flex justify-between items-center mb-2">
                     <p className="text-xs font-bold text-slate-500 uppercase">Trip Progress</p>
                     <p className="text-xs font-bold text-emerald-600">{tripProgress}%</p>
                   </div>
-                  <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+                  <div className="w-full bg-slate-200 h-3 rounded-full overflow-hidden shadow-inner">
                     <motion.div 
-                      className="bg-emerald-600 h-full"
+                      className="bg-emerald-600 h-full relative"
                       initial={{ width: 0 }}
                       animate={{ width: `${tripProgress}%` }}
-                    />
+                      transition={{ type: "spring", stiffness: 50, damping: 20 }}
+                    >
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-[shimmer_2s_infinite]" />
+                    </motion.div>
                   </div>
                   {routeUpdate && (
                     <motion.div 
@@ -445,31 +665,54 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 </div>
               )}
 
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-3">
                 {tripStatus !== 'started' ? (
                   <button 
                     onClick={startTrip}
-                    className="flex-1 bg-emerald-600 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2"
+                    className="w-full bg-emerald-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-100"
                   >
-                    <Navigation size={18} /> Start Trip
+                    <Navigation size={20} /> Start Trip
                   </button>
                 ) : (
-                  <div className="flex-1 bg-emerald-50 text-emerald-700 py-3 rounded-xl font-bold flex items-center justify-center gap-2 border border-emerald-100">
-                    <Clock size={18} className="animate-spin" /> Trip in Progress
+                  <div className="space-y-3">
+                    <div className="w-full bg-emerald-50 text-emerald-700 py-4 rounded-xl font-bold flex items-center justify-center gap-2 border border-emerald-100">
+                      <Clock size={20} className="animate-spin" /> Trip in Progress
+                    </div>
+                    <motion.button 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      onClick={handleShareSMS}
+                      className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-700 transition-all shadow-lg shadow-blue-100"
+                    >
+                      <MessageCircle size={20} /> Share Details via SMS
+                    </motion.button>
                   </div>
                 )}
-                <button 
-                  onClick={handleShareTrip}
-                  className="bg-slate-100 text-slate-600 p-3 rounded-xl hover:bg-slate-200 transition-all"
-                >
-                  <Share2 size={20} />
-                </button>
-                <button 
-                  onClick={handleSOS}
-                  className="bg-red-100 text-red-600 p-3 rounded-xl hover:bg-red-200 transition-all"
-                >
-                  <AlertTriangle size={20} />
-                </button>
+              </div>
+                
+              <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={handleSOS}
+                    className="w-full bg-red-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-red-700 transition-all shadow-lg shadow-red-200 animate-pulse"
+                  >
+                    <AlertTriangle size={24} /> SEND EMERGENCY SOS
+                  </button>
+                  
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={handleShareTrip}
+                      className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
+                    >
+                      <Share2 size={18} /> Share Trip
+                    </button>
+                    <button 
+                      onClick={() => setIsReportModalOpen(true)}
+                      className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
+                    >
+                      <Shield size={18} /> Report Issue
+                    </button>
+                  </div>
+                </div>
               </div>
             </motion.div>
           )}
