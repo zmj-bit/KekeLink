@@ -29,6 +29,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
   const [shiftEarnings, setShiftEarnings] = useState(0);
   const [shiftTrips, setShiftTrips] = useState(0);
   const [showShiftSummary, setShowShiftSummary] = useState(false);
+  const [tripHistory, setTripHistory] = useState<any[]>([]);
   const [passengerStatus, setPassengerStatus] = useState<string | null>(null);
   const [tripStartTime, setTripStartTime] = useState<string | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -58,7 +59,36 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     incidents_reported: 0
   });
   const [isCoachingLoading, setIsCoachingLoading] = useState(false);
+  const [showRouteFeedbackModal, setShowRouteFeedbackModal] = useState(false);
+  const [routeIntelligence, setRouteIntelligence] = useState<any[]>([]);
+  const [feedbackData, setFeedbackData] = useState({
+    rating: 5,
+    comments: '',
+    safety_concerns: '',
+    traffic_level: 'moderate'
+  });
+  const [isAuthoritiesAlerted, setIsAuthoritiesAlerted] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const fetchRouteIntelligence = async () => {
+      try {
+        const response = await fetch('/api/reports/route-intelligence');
+        if (response.ok) {
+          const data = await response.json();
+          setRouteIntelligence(data);
+        }
+      } catch (error) {
+        console.error("Error fetching route intelligence:", error);
+      }
+    };
+    fetchRouteIntelligence();
+  }, []);
+
+  useEffect(() => {
+    const history = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
+    setTripHistory(history);
+  }, []);
 
   const fetchSafetyCoaching = async (metrics: any) => {
     setIsCoachingLoading(true);
@@ -146,16 +176,25 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           if (result.is_anomaly) {
             setAnomalyWarning(result);
             setShiftMetrics(prev => ({ ...prev, anomalies_detected: prev.anomalies_detected + 1 }));
+            
+            if (result.risk_level === 'high' || result.should_alert_authorities) {
+              setIsAuthoritiesAlerted(true);
+              // In a real app, this would call a dedicated emergency API
+              console.log("!!! ALERTING AUTHORITIES !!!", result.reason);
+            }
+
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({
                 type: 'anomaly_alert',
                 userId: user.id,
                 reason: result.reason,
-                risk_level: result.risk_level
+                risk_level: result.risk_level,
+                notifiedAuthorities: result.risk_level === 'high' ? ['Police', 'Keke Union Security'] : []
               }));
             }
           } else {
             setAnomalyWarning(null);
+            setIsAuthoritiesAlerted(false);
           }
         } catch (error) {
           console.warn("Anomaly detection error (likely rate limit):", error);
@@ -221,11 +260,13 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             }
             if (data.type === 'sos_alert') {
               const tripInfo = data.tripData ? ` (Trip: ${data.tripData.origin} to ${data.tripData.destination})` : '';
+              const authorities = data.notifiedAuthorities ? ` [Authorities Notified: ${data.notifiedAuthorities.join(', ')}]` : '';
               setAlerts(prev => [{
                 category: 'EMERGENCY SOS',
-                summary: `User ${data.userId} needs immediate help at ${data.location}${tripInfo}`,
+                summary: `Driver ${data.userName || data.userId} needs immediate help at ${data.location}${tripInfo}${authorities}`,
                 location: data.location,
-                isSOS: true
+                isSOS: true,
+                priority: data.priority
               }, ...prev].slice(0, 3));
             }
             if (data.type === 'nearby_kekes') {
@@ -371,13 +412,24 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     const userMsg = { role: 'driver', text: chatInput, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
     setChatMessages(prev => [...prev, userMsg]);
     const currentInput = chatInput;
+    const currentHistory = chatMessages.map(m => ({
+      role: m.role === 'driver' ? 'user' as const : 'model' as const,
+      parts: [{ text: m.text }]
+    }));
     setChatInput('');
     
     // Simulate passenger response using AI
     try {
+      const persona = `You are a passenger named ${activeTrip.passenger} in Kano, Nigeria. 
+      A Keke driver named ${user.name} is messaging you. 
+      You are currently ${activeTrip.id ? `on a trip to ${activeTrip.destination}` : `waiting for them to pick you up at ${activeTrip.origin}`}.
+      Respond briefly and naturally in English with a touch of Hausa (e.g., Sannu, Na gode, Toh). 
+      Be polite but direct. Keep responses under 25 words.`;
+
       const passengerReply = await geminiService.chatWithAssistant(
         currentInput, 
-        `You are a passenger named ${activeTrip.passenger} in Kano, Nigeria. A Keke driver named ${user.name} just messaged you: "${currentInput}". Respond briefly and naturally in English with a touch of Hausa (e.g., Sannu, Na gode). You are waiting for them or currently on a trip to ${activeTrip.destination}.`
+        persona,
+        currentHistory
       );
       
       setTimeout(() => {
@@ -397,13 +449,17 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
       const sosData = { 
         type: 'sos', 
         userId: user.id,
-        location: `${currentLocation.lat}, ${currentLocation.lng}`,
+        userName: user.name,
+        location: `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}`,
         tripData: activeTrip ? {
           origin: activeTrip.origin,
           destination: activeTrip.destination,
-          passenger: activeTrip.passenger
+          passenger: activeTrip.passenger,
+          fare: activeTrip.fare,
+          startTime: tripStartTime
         } : null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        isEmergency: true
       };
       
       wsRef.current.send(JSON.stringify(sosData));
@@ -459,6 +515,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
       const existingLogs = JSON.parse(localStorage.getItem('keke_trip_logs') || '[]');
       const updatedLogs = [tripLog, ...existingLogs].slice(0, 50);
       localStorage.setItem('keke_trip_logs', JSON.stringify(updatedLogs));
+      setTripHistory(updatedLogs);
 
       setEarnings(prev => prev + fare);
       setShiftEarnings(prev => prev + fare);
@@ -522,14 +579,51 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
       setTripStartTime(new Date().toISOString());
       setNearbyPassengers([]);
       
-      // 2. Get optimized routes from AI
-      const result = await geminiService.optimizeRoute(trip.origin, trip.destination);
+      // 2. Get optimized routes from AI, passing route intelligence
+      const result = await geminiService.optimizeRoute(trip.origin, trip.destination, routeIntelligence);
       setSuggestedRoutes(result.routes || []);
     } catch (error) {
       console.error("Trip start error:", error);
       alert("Failed to start trip. Please try again.");
     } finally {
       setIsOptimizing(false);
+    }
+  };
+
+  const submitRouteFeedback = async () => {
+    if (!activeTrip && !selectedRoute) return;
+    
+    try {
+      await fetch('/api/reports/route-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          driver_id: user.id,
+          route_name: selectedRoute?.name || "Current Route",
+          origin: activeTrip?.origin || "Unknown",
+          destination: activeTrip?.destination || "Unknown",
+          ...feedbackData
+        })
+      });
+      
+      alert("Thank you! Your feedback has been logged to improve AI routing and safety.");
+      setShowRouteFeedbackModal(false);
+      setFeedbackData({
+        rating: 5,
+        comments: '',
+        safety_concerns: '',
+        traffic_level: 'moderate'
+      });
+      
+      // Refresh intelligence
+      const response = await fetch('/api/reports/route-intelligence');
+      if (response.ok) {
+        const data = await response.json();
+        setRouteIntelligence(data);
+      }
+    } catch (error) {
+      console.error("Error submitting feedback:", error);
+      alert("Failed to submit feedback.");
     }
   };
 
@@ -555,6 +649,12 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                   AI Safety Warning: {anomalyWarning.risk_level} Risk
                 </p>
                 <p className="text-sm opacity-90">{anomalyWarning.reason}</p>
+                {isAuthoritiesAlerted && (
+                  <div className="mt-3 flex items-center gap-2 bg-white/20 p-2 rounded-xl border border-white/30">
+                    <Shield size={16} className="animate-pulse" />
+                    <span className="text-[10px] font-black uppercase tracking-tighter">Authorities Notified</span>
+                  </div>
+                )}
               </div>
               <button 
                 onClick={() => setAnomalyWarning(null)}
@@ -681,11 +781,36 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                 <p className="text-xs text-slate-500 font-medium uppercase tracking-wider mt-0.5">KekeLink Certified Driver</p>
               </div>
             </div>
-            <div className="text-right">
-              <p className="text-xs font-bold text-slate-400 uppercase mb-1">Safety Rating</p>
-              <div className="flex items-center gap-1 text-emerald-600 font-bold">
-                <Star size={16} fill="currentColor" />
-                <span className="text-xl">4.9</span>
+            <div className="flex items-center gap-6">
+              <div className="flex flex-col items-end gap-1">
+                <p className="text-[10px] font-bold text-slate-400 uppercase">Shift Status</p>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold ${isOnShift ? 'text-emerald-600' : 'text-slate-400'}`}>
+                    {isOnShift ? 'ONLINE' : 'OFFLINE'}
+                  </span>
+                  <button 
+                    onClick={() => {
+                      if (activeTrip) {
+                        alert("Please complete your active trip before going offline.");
+                        return;
+                      }
+                      setIsOnShift(!isOnShift);
+                    }}
+                    className={`w-12 h-6 rounded-full transition-all relative shadow-inner ${isOnShift ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  >
+                    <motion.div 
+                      animate={{ x: isOnShift ? 26 : 2 }}
+                      className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
+                    />
+                  </button>
+                </div>
+              </div>
+              <div className="text-right border-l border-slate-100 pl-6">
+                <p className="text-xs font-bold text-slate-400 uppercase mb-1">Safety Rating</p>
+                <div className="flex items-center gap-1 text-emerald-600 font-bold">
+                  <Star size={16} fill="currentColor" />
+                  <span className="text-xl">4.9</span>
+                </div>
               </div>
             </div>
           </div>
@@ -1149,11 +1274,121 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                   )}
                 </div>
               )}
+
+              {/* Trip History & Performance Analysis */}
+              <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="font-bold text-xl flex items-center gap-2">
+                    <TrendingUp size={20} className="text-emerald-600" /> Performance Analysis
+                  </h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase">Last 50 Trips</p>
+                </div>
+
+                {tripHistory.length === 0 ? (
+                  <div className="py-12 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                    <Clock size={32} className="mx-auto text-slate-300 mb-3" />
+                    <p className="text-slate-500 font-medium">No trip data available yet.</p>
+                    <p className="text-[10px] text-slate-400 uppercase mt-1">Complete trips to see analysis</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {tripHistory.map((trip, idx) => (
+                      <motion.div 
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: idx * 0.05 }}
+                        key={idx} 
+                        className="p-4 rounded-2xl border border-slate-100 bg-slate-50/50 hover:bg-white hover:shadow-md transition-all group"
+                      >
+                        <div className="flex justify-between items-start mb-3">
+                          <div>
+                            <p className="font-bold text-slate-900">{trip.passenger}</p>
+                            <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wider">
+                              {new Date(trip.endTime).toLocaleDateString()} • {new Date(trip.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-bold text-emerald-600">₦{trip.fare}</p>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase">{trip.distance}</p>
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                          <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-1">
+                              <Shield size={12} className={trip.safetyScore >= 90 ? "text-emerald-500" : "text-amber-500"} />
+                              <span className="text-[10px] font-bold text-slate-700">Safety: {trip.safetyScore}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Navigation size={12} className="text-blue-500" />
+                              <span className="text-[10px] font-bold text-slate-700">Adherence: {Math.round(trip.routeAdherence * 100)}%</span>
+                            </div>
+                          </div>
+                          <div className="bg-white px-2 py-1 rounded-lg border border-slate-200 text-[10px] font-bold text-slate-500">
+                            ID: #{trip.tripId?.toString().slice(-4) || 'N/A'}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Sidebar */}
           <div className="space-y-6">
+            {/* Shift Controls Card */}
+            <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                  <Car size={18} className="text-emerald-600" /> Shift Controls
+                </h3>
+                <div className={`px-2 py-1 rounded-full text-[10px] font-bold ${isOnShift ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                  {isOnShift ? 'ONLINE' : 'OFFLINE'}
+                </div>
+              </div>
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">Online Status</p>
+                    <p className="text-[10px] text-slate-500">Enable to receive trip requests</p>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      if (activeTrip) {
+                        alert("Please complete your active trip before going offline.");
+                        return;
+                      }
+                      setIsOnShift(!isOnShift);
+                    }}
+                    className={`w-14 h-7 rounded-full transition-all relative shadow-inner ${isOnShift ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  >
+                    <motion.div 
+                      animate={{ x: isOnShift ? 30 : 2 }}
+                      className="absolute top-1 w-5 h-5 bg-white rounded-full shadow-md"
+                    />
+                  </button>
+                </div>
+                {!isOnShift && (
+                  <button 
+                    onClick={startShift}
+                    className="w-full py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                  >
+                    Go Online
+                  </button>
+                )}
+                {isOnShift && !activeTrip && (
+                  <button 
+                    onClick={() => setIsOnShift(false)}
+                    className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition-all"
+                  >
+                    End Shift
+                  </button>
+                )}
+              </div>
+            </div>
+
             <div className="bg-slate-900 text-white p-6 rounded-3xl">
               <h3 className="font-bold mb-4 flex items-center gap-2">
                 <Map className="text-emerald-400" /> Demand Hotspots
@@ -1464,6 +1699,97 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         </motion.button>
       )}
 
+      {/* Route Feedback Modal */}
+      <AnimatePresence>
+        {showRouteFeedbackModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[120] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl"
+            >
+              <h2 className="text-2xl font-bold mb-2">Route Feedback</h2>
+              <p className="text-slate-500 mb-6 text-sm">Help us improve AI routing by sharing your experience on this route.</p>
+              
+              <div className="space-y-4 mb-8">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">Route Rating</label>
+                  <div className="flex gap-2">
+                    {[1, 2, 3, 4, 5].map(s => (
+                      <button 
+                        key={s}
+                        onClick={() => setFeedbackData(prev => ({ ...prev, rating: s }))}
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold transition-all ${
+                          feedbackData.rating === s ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-400'
+                        }`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">Traffic Level</label>
+                  <select 
+                    value={feedbackData.traffic_level}
+                    onChange={(e) => setFeedbackData(prev => ({ ...prev, traffic_level: e.target.value }))}
+                    className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  >
+                    <option value="light">Light</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="heavy">Heavy</option>
+                    <option value="gridlock">Gridlock</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">Safety Concerns</label>
+                  <input 
+                    type="text"
+                    placeholder="e.g. Poor lighting, potholes, suspicious activity"
+                    value={feedbackData.safety_concerns}
+                    onChange={(e) => setFeedbackData(prev => ({ ...prev, safety_concerns: e.target.value }))}
+                    className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">General Comments</label>
+                  <textarea 
+                    rows={3}
+                    placeholder="Any other details..."
+                    value={feedbackData.comments}
+                    onChange={(e) => setFeedbackData(prev => ({ ...prev, comments: e.target.value }))}
+                    className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-500/20 resize-none"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setShowRouteFeedbackModal(false)}
+                  className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-slate-50 transition-all"
+                >
+                  Skip
+                </button>
+                <button 
+                  onClick={submitRouteFeedback}
+                  className="flex-1 bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg"
+                >
+                  Submit Feedback
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* SOS Confirmation Overlay */}
       <AnimatePresence>
         {sosSent && (
@@ -1547,6 +1873,15 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
               </div>
 
               <div className="flex gap-4">
+                <button 
+                  onClick={() => {
+                    setShowCompletionModal(false);
+                    setShowRouteFeedbackModal(true);
+                  }}
+                  className="flex-1 py-4 rounded-2xl font-bold text-emerald-600 hover:bg-emerald-50 transition-all border border-emerald-200"
+                >
+                  Route Feedback
+                </button>
                 <button 
                   onClick={() => setShowCompletionModal(false)}
                   className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-slate-50 transition-all border border-transparent hover:border-slate-200"

@@ -78,24 +78,34 @@ export const geminiService = {
     }, { id_number: 'PENDING', full_name: 'Verification in Progress' });
   },
 
-  async chatWithAssistant(message: string, context: string) {
+  async chatWithAssistant(message: string, context: string, history: { role: 'user' | 'model', parts: { text: string }[] }[] = []) {
     return handleAiCall(async () => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: message,
+        contents: [
+          ...history.map(h => ({ role: h.role, parts: h.parts })),
+          { role: 'user', parts: [{ text: message }] }
+        ],
         config: {
-          systemInstruction: `You are KekeLink AI Assistant. You help passengers and drivers in Nigeria (Northern region). You speak Hausa and English. Context: ${context}`,
+          systemInstruction: context,
         },
       });
       return response.text;
-    }, "Sannu! I'm having trouble connecting to my brain right now, but I'm still here to help with basic safety features.");
+    }, "Sannu! I'm having trouble connecting to my brain right now, but I'm still here to help.");
   },
 
   async detectTripAnomaly(tripData: any) {
     return handleAiCall(async () => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Analyze this trip data for anomalies (e.g., unexpected route deviation, long stops): ${JSON.stringify(tripData)}`,
+        contents: `Analyze this real-time Keke trip data for anomalies in Northern Nigeria (e.g., Kano): ${JSON.stringify(tripData)}.
+        Look for:
+        1. Route Deviation: Is the current location far from the expected path to ${tripData.destination}?
+        2. Speed Anomalies: Is the speed (${tripData.speed} km/h) unusual for a Keke (max ~50km/h) or the area?
+        3. Long Stops: Has the Keke been stationary in an unusual spot?
+        4. Late Night Activity: Is this happening at an unsafe hour?
+        
+        Provide a risk level: 'low', 'medium', or 'high'. If high, suggest immediate authority notification.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -104,13 +114,14 @@ export const geminiService = {
               is_anomaly: { type: Type.BOOLEAN },
               reason: { type: Type.STRING },
               risk_level: { type: Type.STRING },
+              should_alert_authorities: { type: Type.BOOLEAN }
             },
-            required: ["is_anomaly"],
+            required: ["is_anomaly", "reason", "risk_level"],
           },
         },
       });
       return JSON.parse(response.text || "{}");
-    }, { is_anomaly: false, reason: "AI Monitoring Offline", risk_level: "low" });
+    }, { is_anomaly: false, reason: "AI Monitoring Offline", risk_level: "low", should_alert_authorities: false });
   },
 
   async classifySafetyReport(content: string, isVoice: boolean = false) {
@@ -161,11 +172,21 @@ export const geminiService = {
     }, { base_fare: 400, total_fare: 500, explanation: "Standard rate applied (AI pricing offline)" });
   },
 
-  async optimizeRoute(origin: string, destination: string) {
+  async optimizeRoute(origin: string, destination: string, driverFeedback: any[] = []) {
     return handleAiCall(async () => {
+      const feedbackContext = driverFeedback.length > 0 
+        ? `Consider this recent driver feedback for these areas: ${JSON.stringify(driverFeedback.map(f => ({ location: f.route_name, concern: f.safety_concerns, traffic: f.traffic_level })))}`
+        : "";
+
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Suggest 2 optimal Keke routes from ${origin} to ${destination} in a Northern Nigerian city (e.g. Kano). One for speed, one for safety/avoiding high-traffic corridors.`,
+        contents: `Suggest 3 optimal Keke routes from ${origin} to ${destination} in a Northern Nigerian city (e.g. Kano). 
+        ${feedbackContext}
+        Consider current traffic patterns, known safety corridors, and road conditions.
+        Provide:
+        1. "Fastest Route" - prioritizes speed.
+        2. "Safety Corridor" - prioritizes well-lit, high-traffic, and monitored roads.
+        3. "Balanced Route" - a mix of both.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -189,7 +210,13 @@ export const geminiService = {
         },
       });
       return JSON.parse(response.text || "{}");
-    }, { routes: [{ name: "Direct Route", description: "Standard corridor route", estimated_time: "15 mins", safety_rating: "Good" }] });
+    }, { 
+      routes: [
+        { name: "Fastest Route", description: "Direct corridor via main road", estimated_time: "12 mins", safety_rating: "Good" },
+        { name: "Safety Corridor", description: "Well-lit route via security checkpoints", estimated_time: "18 mins", safety_rating: "Excellent" },
+        { name: "Balanced Route", description: "Optimized for both speed and safety", estimated_time: "15 mins", safety_rating: "Very Good" }
+      ] 
+    });
   },
 
   async onboardingAssistant(message: string, history: { role: 'user' | 'model', parts: { text: string }[] }[]) {

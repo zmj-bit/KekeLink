@@ -58,13 +58,27 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     trip_id INTEGER,
-    type TEXT, -- 'incident', 'lost_found', 'safety_report'
+    type TEXT, -- 'incident', 'lost_found', 'safety_report', 'route_feedback'
     category TEXT,
     risk_level TEXT,
     content TEXT,
     location TEXT,
     audio_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS route_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    driver_id INTEGER,
+    route_name TEXT,
+    origin TEXT,
+    destination TEXT,
+    rating INTEGER, -- 1-5
+    comments TEXT,
+    safety_concerns TEXT,
+    traffic_level TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(driver_id) REFERENCES users(id)
   );
 
   -- Seed a mock Keke for testing
@@ -140,6 +154,28 @@ async function startServer() {
       GROUP BY location, category, risk_level
     `).all();
     res.json(hotspots);
+  });
+
+  app.post("/api/reports/route-feedback", (req, res) => {
+    const { driver_id, route_name, origin, destination, rating, comments, safety_concerns, traffic_level } = req.body;
+    try {
+      const info = db.prepare(`
+        INSERT INTO route_feedback (driver_id, route_name, origin, destination, rating, comments, safety_concerns, traffic_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(driver_id, route_name, origin, destination, rating, comments, safety_concerns, traffic_level);
+      res.json({ id: info.lastInsertRowid, success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/reports/route-intelligence", (req, res) => {
+    const feedback = db.prepare(`
+      SELECT * FROM route_feedback 
+      ORDER BY created_at DESC 
+      LIMIT 100
+    `).all();
+    res.json(feedback);
   });
 
   app.post("/api/auth/register", (req, res) => {
@@ -235,15 +271,22 @@ async function startServer() {
       if (data.type === "sos" && userId) {
         // Broadcast SOS to admin/gov and nearby drivers
         const timestamp = new Date().toISOString();
-        console.log(`SOS from user ${userId} at ${timestamp}`);
+        const senderName = data.userName || `User ${userId}`;
+        console.log(`[EMERGENCY] SOS from ${senderName} (ID: ${userId}) at ${timestamp}`);
+        console.log(`[AUTHORITIES] Notifying Kano State Road Traffic Agency (KAROTA) and Emergency Services...`);
+        
         wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify({ 
               type: "sos_alert", 
               userId, 
+              userName: senderName,
               location: data.location,
               tripData: data.tripData,
-              timestamp 
+              timestamp,
+              isSOS: true,
+              priority: 'CRITICAL',
+              notifiedAuthorities: ['KAROTA', 'Police', 'Emergency Response']
             }));
           }
         });

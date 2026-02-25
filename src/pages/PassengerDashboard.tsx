@@ -16,6 +16,8 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   const [routeUpdate, setRouteUpdate] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [sosSent, setSosSent] = useState(false);
+  const SOS_DURATION = 10;
+  const [sosCountdown, setSosCountdown] = useState<number | null>(null);
   const [nearbyKekes, setNearbyKekes] = useState<any[]>([]);
   const [pendingRating, setPendingRating] = useState<any>(null);
   const [ratingValue, setRatingValue] = useState(0);
@@ -25,7 +27,10 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   const [useStudentDiscount, setUseStudentDiscount] = useState(false);
   const [isAiMonitoring, setIsAiMonitoring] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatTarget, setChatTarget] = useState<any>(null);
   const [selectedKeke, setSelectedKeke] = useState<any>(null);
+  const [showDriverProfile, setShowDriverProfile] = useState<any>(null);
+  const [showTripConfirmation, setShowTripConfirmation] = useState<any>(null);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatInput, setChatInput] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
@@ -254,6 +259,19 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
     };
   }, [user.id, activeTrip?.keke, tripStatus]);
 
+  useEffect(() => {
+    let timer: any;
+    if (sosCountdown !== null && sosCountdown > 0) {
+      timer = setInterval(() => {
+        setSosCountdown(prev => (prev !== null ? prev - 1 : null));
+      }, 1000);
+    } else if (sosCountdown === 0) {
+      confirmAndSendSOS();
+      setSosCountdown(null);
+    }
+    return () => clearInterval(timer);
+  }, [sosCountdown]);
+
   const handleSearch = async () => {
     if (!destination) return alert("Please enter a destination");
     
@@ -316,6 +334,10 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   };
 
   const handleSOS = () => {
+    setSosCountdown(SOS_DURATION);
+  };
+
+  const confirmAndSendSOS = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const sosData = { 
         type: 'sos', 
@@ -339,18 +361,30 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim() || !activeTrip) return;
+    const target = chatTarget || (activeTrip ? { name: activeTrip.driver, kekeId: activeTrip.keke, destination: activeTrip.destination } : null);
+    if (!chatInput.trim() || !target) return;
     
     const userMsg = { role: 'user', text: chatInput, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
     setChatMessages(prev => [...prev, userMsg]);
     const currentInput = chatInput;
+    const currentHistory = chatMessages.map(m => ({
+      role: m.role === 'user' ? 'user' as const : 'model' as const,
+      parts: [{ text: m.text }]
+    }));
     setChatInput('');
     
     // Simulate driver response using AI
     try {
+      const persona = `You are a Keke driver named ${target.name} in Kano, Nigeria. 
+      You are speaking to your passenger. 
+      ${activeTrip ? `You are currently on a trip to ${target.destination}.` : `You are currently available near your Keke (ID: ${target.kekeId}).`}
+      Respond briefly, professionally, and naturally in English with a touch of Hausa (e.g., Sannu, Na gode, Toh, Ba damuwa). 
+      Be helpful and polite. Keep responses under 30 words.`;
+
       const driverReply = await geminiService.chatWithAssistant(
         currentInput, 
-        `You are a Keke driver named ${activeTrip.driver} in Kano. A passenger just messaged you: "${currentInput}". Respond briefly and professionally in English with a touch of Hausa (e.g., Sannu, Na gode). You are currently driving them to ${activeTrip.destination}.`
+        persona,
+        currentHistory
       );
       
       setTimeout(() => {
@@ -469,7 +503,7 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
 
       {/* Driver Chat Modal */}
       <AnimatePresence>
-        {isChatOpen && activeTrip && (
+        {isChatOpen && (chatTarget || activeTrip) && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -486,15 +520,18 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
               <div className="p-4 bg-emerald-600 text-white flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center overflow-hidden">
-                    <img src={`https://picsum.photos/seed/${activeTrip.driver}/100/100`} alt="Driver" referrerPolicy="no-referrer" />
+                    <img src={`https://picsum.photos/seed/${chatTarget?.id || 'driver'}/100/100`} alt="Driver" referrerPolicy="no-referrer" />
                   </div>
                   <div>
-                    <p className="font-bold">{activeTrip.driver}</p>
+                    <p className="font-bold">{chatTarget?.name || activeTrip?.driver}</p>
                     <p className="text-[10px] opacity-80 uppercase font-bold tracking-wider">Your Keke Driver</p>
                   </div>
                 </div>
                 <button 
-                  onClick={() => setIsChatOpen(false)}
+                  onClick={() => {
+                    setIsChatOpen(false);
+                    setChatTarget(null);
+                  }}
                   className="p-2 hover:bg-white/10 rounded-full transition-colors"
                 >
                   <X size={20} />
@@ -508,7 +545,7 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                     <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
                       <MessageCircle size={32} className="text-slate-300" />
                     </div>
-                    <p className="text-slate-500 text-sm">No messages yet. Say hello to {activeTrip.driver}!</p>
+                    <p className="text-slate-500 text-sm">No messages yet. Say hello to {chatTarget?.name || activeTrip?.driver}!</p>
                   </div>
                 )}
                 {chatMessages.map((msg, idx) => (
@@ -553,6 +590,127 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 </div>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Trip Confirmation Modal */}
+      <AnimatePresence>
+        {showTripConfirmation && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl p-8"
+            >
+              <div className="text-center mb-6">
+                <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Car className="text-emerald-600" size={40} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Confirm Request</h2>
+                <p className="text-slate-500 text-sm mt-2">Are you sure you want to request a trip with {showTripConfirmation.name}?</p>
+              </div>
+
+              <div className="bg-slate-50 rounded-2xl p-4 mb-8 border border-slate-100">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Destination</span>
+                  <span className="text-xs font-bold text-slate-900 truncate max-w-[150px]">{destination}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Keke ID</span>
+                  <span className="text-xs font-mono font-bold text-slate-900">{showTripConfirmation.kekeId}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <button 
+                  onClick={() => setShowTripConfirmation(null)}
+                  className="py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    setKekeId(showTripConfirmation.kekeId);
+                    setShowTripConfirmation(null);
+                    setSelectedKeke(null);
+                    handleSearch();
+                  }}
+                  className="py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* SOS Countdown Overlay */}
+      <AnimatePresence>
+        {sosCountdown !== null && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/90 backdrop-blur-md"
+          >
+            <div className="bg-white p-8 rounded-3xl shadow-2xl text-center max-w-sm w-full">
+              <div className="w-24 h-24 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-6 relative">
+                <AlertTriangle className="text-red-600" size={48} />
+                <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 100 100">
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="45"
+                    fill="none"
+                    stroke="#fee2e2"
+                    strokeWidth="4"
+                  />
+                  <motion.circle
+                    cx="50"
+                    cy="50"
+                    r="45"
+                    fill="none"
+                    stroke="#dc2626"
+                    strokeWidth="4"
+                    strokeDasharray="282.7"
+                    initial={{ strokeDashoffset: 0 }}
+                    animate={{ strokeDashoffset: 282.7 * (1 - (sosCountdown || 0) / SOS_DURATION) }}
+                    transition={{ duration: 1, ease: "linear" }}
+                  />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center text-2xl font-black text-red-600">
+                  {sosCountdown}
+                </span>
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-2 uppercase tracking-tight">Emergency SOS</h2>
+              <p className="text-slate-600 mb-8 text-sm">Sending emergency alert in {sosCountdown} seconds. Authorities and nearby drivers will be notified.</p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={() => {
+                    confirmAndSendSOS();
+                    setSosCountdown(null);
+                  }}
+                  className="w-full py-4 bg-red-600 text-white rounded-2xl font-bold shadow-lg shadow-red-100 hover:bg-red-700 transition-all"
+                >
+                  Send Now
+                </button>
+                <button 
+                  onClick={() => setSosCountdown(null)}
+                  className="w-full py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                >
+                  Cancel (Accidental)
+                </button>
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -627,11 +785,25 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
           <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
             <div className="flex justify-between items-center mb-4">
               <h3 className="font-bold text-slate-900 flex items-center gap-2">
-                <Navigation size={18} className="text-emerald-600" /> Nearby Available Kekes
+                <Navigation size={18} className="text-emerald-600" /> Nearby Keke Network
               </h3>
-              <span className="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full animate-pulse">
-                {nearbyKekes.length} ONLINE
-              </span>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <span className="text-[8px] font-bold text-slate-500 uppercase">Available</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-blue-500" />
+                  <span className="text-[8px] font-bold text-slate-500 uppercase">On Trip</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-slate-400" />
+                  <span className="text-[8px] font-bold text-slate-500 uppercase">Offline</span>
+                </div>
+                <span className="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full animate-pulse ml-2">
+                  {nearbyKekes.length} ACTIVE
+                </span>
+              </div>
             </div>
             <div className="aspect-video bg-slate-100 rounded-2xl relative overflow-hidden border border-slate-200">
               <img 
@@ -648,6 +820,7 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                       key={keke.driverId}
                       initial={{ scale: 0 }}
                       animate={{ scale: 1 }}
+                      whileHover={{ scale: 1.2, zIndex: 40 }}
                       className="absolute cursor-pointer group"
                       style={{ 
                         top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
@@ -655,19 +828,53 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                       }}
                       onClick={() => setSelectedKeke(keke)}
                     >
-                      <div className={`${status === 'On Trip' ? 'bg-blue-600' : status === 'Offline' ? 'bg-slate-400' : 'bg-emerald-600'} text-white p-2 rounded-full shadow-lg group-hover:scale-110 transition-transform`}>
-                        <Car size={16} />
+                      <div className={`relative ${
+                        status === 'On Trip' ? 'bg-blue-600 ring-4 ring-blue-500/20' : 
+                        status === 'Offline' ? 'bg-slate-400 grayscale' : 
+                        'bg-emerald-600 ring-4 ring-emerald-500/20'
+                      } text-white p-2.5 rounded-2xl shadow-xl transition-all duration-300`}>
+                        <Car size={18} className={status === 'Available' ? 'animate-bounce' : ''} />
+                        
+                        {/* Status Indicator Dot */}
+                        <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
+                          status === 'On Trip' ? 'bg-blue-400' : 
+                          status === 'Offline' ? 'bg-slate-300' : 
+                          'bg-emerald-400'
+                        }`} />
                       </div>
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg shadow-xl z-20">
-                        <div className="flex flex-col gap-0.5">
-                          <p className="font-bold flex items-center gap-1">
-                            {keke.name}
-                            <span className={`text-[8px] px-1 rounded-sm uppercase ${status === 'On Trip' ? 'bg-blue-500' : 'bg-emerald-500'}`}>
+
+                      {/* Status Text Label */}
+                      <div className="mt-1.5 text-center">
+                        <span className={`text-[7px] font-black uppercase px-1.5 py-0.5 rounded-md shadow-sm border border-white/20 whitespace-nowrap ${
+                          status === 'On Trip' ? 'bg-blue-600 text-white' : 
+                          status === 'Offline' ? 'bg-slate-500 text-white' : 
+                          'bg-emerald-600 text-white'
+                        }`}>
+                          {status}
+                        </span>
+                      </div>
+                      
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-3 py-2 rounded-xl shadow-2xl z-50">
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-bold">{keke.name}</p>
+                            <span className={`text-[8px] px-1.5 py-0.5 rounded-md uppercase font-black ${
+                              status === 'On Trip' ? 'bg-blue-500' : 
+                              status === 'Offline' ? 'bg-slate-700' : 
+                              'bg-emerald-500'
+                            }`}>
                               {status}
                             </span>
-                          </p>
-                          <p className="opacity-70">{keke.kekeId}</p>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <p className="opacity-70 font-mono">{keke.kekeId}</p>
+                            <div className="flex items-center gap-0.5 text-yellow-400">
+                              <Star size={8} fill="currentColor" />
+                              <span className="font-bold">4.8</span>
+                            </div>
+                          </div>
                         </div>
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-slate-900" />
                       </div>
                     </motion.div>
                   );
@@ -681,47 +888,102 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                       exit={{ opacity: 0, y: 20 }}
                       className="absolute bottom-4 left-4 right-4 bg-white rounded-2xl shadow-2xl p-4 z-30 border border-slate-100"
                     >
-                      <div className="flex justify-between items-start mb-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-slate-100 overflow-hidden">
-                            <img src={`https://picsum.photos/seed/${selectedKeke.driverId}/100/100`} alt="Driver" referrerPolicy="no-referrer" />
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Keke Info Card</span>
+                      </div>
+                      <div className="flex justify-between items-start mb-4">
+                        <div className="flex items-center gap-4">
+                          <div className="w-14 h-14 rounded-2xl bg-slate-100 overflow-hidden border-2 border-white shadow-sm">
+                            <img src={`https://picsum.photos/seed/${selectedKeke.driverId}/200/200`} alt="Driver" referrerPolicy="no-referrer" className="w-full h-full object-cover" />
                           </div>
                           <div>
-                            <h4 className="font-bold text-sm text-slate-900">{selectedKeke.name}</h4>
-                            <p className="text-[10px] text-slate-500">{selectedKeke.kekeId}</p>
+                            <h4 className="font-bold text-base text-slate-900">{selectedKeke.name}</h4>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <p className="text-xs text-slate-500 font-mono">{selectedKeke.kekeId}</p>
+                              <div className={`text-[8px] font-black px-2 py-0.5 rounded-full uppercase ${
+                                selectedKeke.status === 'On Trip' ? 'bg-blue-100 text-blue-600' : 
+                                selectedKeke.status === 'Offline' ? 'bg-slate-100 text-slate-600' : 
+                                'bg-emerald-100 text-emerald-600'
+                              }`}>
+                                {selectedKeke.status || 'Available'}
+                              </div>
+                            </div>
                           </div>
                         </div>
-                        <button onClick={(e) => { e.stopPropagation(); setSelectedKeke(null); }} className="p-1 hover:bg-slate-100 rounded-full">
-                          <X size={16} className="text-slate-400" />
+                        <button onClick={(e) => { e.stopPropagation(); setSelectedKeke(null); }} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                          <X size={20} className="text-slate-400" />
                         </button>
                       </div>
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-600">
-                          <Star size={12} fill="currentColor" /> 4.8
+                      
+                      <div className="grid grid-cols-3 gap-3 mb-6">
+                        <div className="bg-slate-50 p-2 rounded-xl text-center border border-slate-100">
+                          <div className="flex items-center justify-center gap-1 text-yellow-500 mb-0.5">
+                            <Star size={12} fill="currentColor" />
+                            <span className="text-xs font-bold">4.8</span>
+                          </div>
+                          <p className="text-[8px] text-slate-400 uppercase font-bold">Rating</p>
                         </div>
-                        <div className="flex items-center gap-1 text-[10px] font-bold text-blue-600">
-                          <Shield size={12} /> 96 Safety
+                        <div className="bg-slate-50 p-2 rounded-xl text-center border border-slate-100">
+                          <div className="flex items-center justify-center gap-1 text-emerald-600 mb-0.5">
+                            <Shield size={12} />
+                            <span className="text-xs font-bold">96%</span>
+                          </div>
+                          <p className="text-[8px] text-slate-400 uppercase font-bold">Safety</p>
                         </div>
-                        <div className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full uppercase ${
-                          selectedKeke.status === 'On Trip' ? 'bg-blue-100 text-blue-600' : 
-                          selectedKeke.status === 'Offline' ? 'bg-slate-100 text-slate-600' : 
-                          'bg-emerald-100 text-emerald-600'
-                        }`}>
-                          {selectedKeke.status || 'Available'}
+                        <div className="bg-slate-50 p-2 rounded-xl text-center border border-slate-100">
+                          <div className="flex items-center justify-center gap-1 text-blue-600 mb-0.5">
+                            <Clock size={12} />
+                            <span className="text-xs font-bold">2m</span>
+                          </div>
+                          <p className="text-[8px] text-slate-400 uppercase font-bold">Away</p>
                         </div>
                       </div>
-                      <button 
-                        disabled={selectedKeke.status === 'On Trip' || selectedKeke.status === 'Offline'}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setKekeId(selectedKeke.kekeId);
-                          setSelectedKeke(null);
-                          if (destination) handleSearch();
-                        }}
-                        className="w-full bg-emerald-600 text-white py-2.5 rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:grayscale"
-                      >
-                        {selectedKeke.status === 'On Trip' ? 'Currently Busy' : 'Request this Keke'}
-                      </button>
+
+                      <div className="flex gap-3">
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowDriverProfile(selectedKeke);
+                          }}
+                          className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl font-bold text-xs hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Info size={16} /> View Profile
+                        </button>
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setChatTarget({
+                              name: selectedKeke.name,
+                              id: selectedKeke.driverId,
+                              kekeId: selectedKeke.kekeId
+                            });
+                            setIsChatOpen(true);
+                          }}
+                          className="p-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-all"
+                        >
+                          <MessageCircle size={20} />
+                        </button>
+                      </div>
+
+                      <div className="mt-3">
+                        <button 
+                          disabled={selectedKeke.status === 'On Trip' || selectedKeke.status === 'Offline'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!destination) {
+                              alert("Please enter a destination first!");
+                              document.querySelector('input[placeholder="Enter destination..."]')?.scrollIntoView({ behavior: 'smooth' });
+                              return;
+                            }
+                            setShowTripConfirmation(selectedKeke);
+                          }}
+                          className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-2"
+                        >
+                          <Car size={18} />
+                          {selectedKeke.status === 'On Trip' ? 'Currently Busy' : 'Request Trip'}
+                        </button>
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -1082,6 +1344,104 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
         onClose={() => setIsReportModalOpen(false)} 
         userId={user.id} 
       />
+
+      {/* Driver Profile Modal */}
+      <AnimatePresence>
+        {showDriverProfile && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl"
+            >
+              <div className="relative h-32 bg-emerald-600">
+                <button 
+                  onClick={() => setShowDriverProfile(null)}
+                  className="absolute top-4 right-4 p-2 bg-black/20 hover:bg-black/40 text-white rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="px-8 pb-8 -mt-12">
+                <div className="relative inline-block mb-4">
+                  <div className="w-24 h-24 rounded-3xl bg-white p-1 shadow-xl">
+                    <img 
+                      src={`https://picsum.photos/seed/${showDriverProfile.driverId}/200/200`} 
+                      alt="Driver" 
+                      className="w-full h-full object-cover rounded-2xl"
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
+                  <div className="absolute -bottom-2 -right-2 bg-emerald-500 text-white p-1.5 rounded-xl border-4 border-white shadow-lg">
+                    <CheckCircle size={16} />
+                  </div>
+                </div>
+                
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h2 className="text-2xl font-bold text-slate-900">{showDriverProfile.name}</h2>
+                    <p className="text-sm text-slate-500 font-medium uppercase tracking-wider">KekeLink Certified Driver</p>
+                  </div>
+                  <div className="text-right">
+                    <div className="flex items-center gap-1 text-yellow-500 font-bold text-lg">
+                      <Star size={20} fill="currentColor" />
+                      <span>4.8</span>
+                    </div>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase">Average Rating</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 mb-8">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Keke ID</p>
+                    <p className="font-mono font-bold text-slate-900">{showDriverProfile.kekeId}</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Verification</p>
+                    <p className="text-emerald-600 font-bold flex items-center gap-1">
+                      <Shield size={14} /> Verified
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex items-center gap-4 p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600">
+                      <Shield size={20} />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-emerald-900">Safety First</p>
+                      <p className="text-xs text-emerald-700">This driver has completed 500+ safe trips.</p>
+                    </div>
+                  </div>
+                  
+                  <button 
+                    onClick={() => {
+                      if (!destination) {
+                        alert("Please enter a destination first!");
+                        setShowDriverProfile(null);
+                        document.querySelector('input[placeholder="Enter destination..."]')?.scrollIntoView({ behavior: 'smooth' });
+                        return;
+                      }
+                      setShowTripConfirmation(showDriverProfile);
+                      setShowDriverProfile(null);
+                    }}
+                    className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2"
+                  >
+                    <Car size={20} /> Request Trip
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Permanent Floating SOS Button */}
       <motion.button
