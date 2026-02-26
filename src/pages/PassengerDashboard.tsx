@@ -27,14 +27,42 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   const [useStudentDiscount, setUseStudentDiscount] = useState(false);
   const [isAiMonitoring, setIsAiMonitoring] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [criticalSosAlert, setCriticalSosAlert] = useState<any>(null);
   const [chatTarget, setChatTarget] = useState<any>(null);
   const [selectedKeke, setSelectedKeke] = useState<any>(null);
   const [showDriverProfile, setShowDriverProfile] = useState<any>(null);
   const [showTripConfirmation, setShowTripConfirmation] = useState<any>(null);
+  const [showGeneralConfirmation, setShowGeneralConfirmation] = useState(false);
+  const [showTripConfirmationModal, setShowTripConfirmationModal] = useState<any>(null);
+  const [showSosConfirmModal, setShowSosConfirmModal] = useState(false);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number }>({ lat: 12.0022, lng: 8.5920 });
   const wsRef = useRef<WebSocket | null>(null);
   const lastThresholdRef = useRef(0);
+
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          setCurrentLocation({ lat: latitude, lng: longitude });
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: 'location_update',
+              lat: latitude,
+              lng: longitude,
+              role: 'passenger',
+              isActiveTrip: tripStatus === 'started'
+            }));
+          }
+        },
+        (error) => console.warn("Passenger geolocation error:", error),
+        { enableHighAccuracy: false, maximumAge: 30000, timeout: 15000 }
+      );
+      return () => navigator.geolocation.clearWatch(watchId);
+    }
+  }, [tripStatus]);
 
   const pushAlert = (alert: any) => {
     setAlerts(prev => {
@@ -98,8 +126,8 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
 
     if (tripStatus === 'started' && activeTrip && progressThreshold > lastThresholdRef.current && tripProgress < 100) {
       lastThresholdRef.current = progressThreshold;
-      geminiService.getRouteUpdate(activeTrip.origin, activeTrip.destination, Math.floor(tripProgress))
-        .then(update => setRouteUpdate(update || null));
+      geminiService.getTripIntelligenceUpdate(activeTrip.origin, activeTrip.destination, Math.floor(tripProgress))
+        .then(update => setRouteUpdate(update.update_message || null));
     }
     
     if (tripStatus !== 'started') {
@@ -200,6 +228,17 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
             if (data.type === 'safety_alert') {
               setAlerts(prev => [data, ...prev].slice(0, 3));
             }
+            if (data.type === 'sos_alert') {
+              setCriticalSosAlert(data);
+              // Also add to alerts for persistence
+              pushAlert({
+                type: 'warning',
+                category: 'CRITICAL SOS',
+                summary: `EMERGENCY: ${data.userName} needs help nearby!`,
+                location: data.location,
+                priority: 'high'
+              });
+            }
             if (data.type === 'anomaly_alert') {
               pushAlert({
                 type: 'warning',
@@ -272,31 +311,42 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
     return () => clearInterval(timer);
   }, [sosCountdown]);
 
+  const fetchPricing = async (dest: string) => {
+    setIsSearching(true);
+    setTripStatus('pricing');
+    try {
+      const origin = "Current Location";
+      const currentTime = new Date().toISOString();
+      
+      // Call AI for dynamic pricing
+      const pricing = await geminiService.calculateDynamicPrice(origin, dest, currentTime, 'high');
+      setPricingDetails(pricing);
+    } catch (error) {
+      console.error("Pricing error:", error);
+      alert("Failed to calculate price. Please try again.");
+    } finally {
+      setIsSearching(false);
+      setTripStatus('idle');
+    }
+  };
+
   const handleSearch = async () => {
     if (!destination) return alert("Please enter a destination");
     
-    // Step 1: Fetch pricing if not already available
+    // Step 1: Show confirmation before initiating the booking flow (pricing)
     if (!pricingDetails) {
-      setIsSearching(true);
-      setTripStatus('pricing');
-      try {
-        const origin = "Current Location";
-        const currentTime = new Date().toISOString();
-        
-        // Call AI for dynamic pricing
-        const pricing = await geminiService.calculateDynamicPrice(origin, destination, currentTime, 'high');
-        setPricingDetails(pricing);
-      } catch (error) {
-        console.error("Pricing error:", error);
-        alert("Failed to calculate price. Please try again.");
-      } finally {
-        setIsSearching(false);
-        setTripStatus('idle');
-      }
+      setShowTripConfirmationModal({ destination });
       return;
     }
 
     // Step 2: If we have pricing, proceed to search for a driver (Confirmation)
+    setShowGeneralConfirmation(true);
+  };
+
+  const executeSearch = async (specificKekeId?: string) => {
+    setShowGeneralConfirmation(false);
+    setShowTripConfirmation(null);
+    setSelectedKeke(null);
     setIsSearching(true);
     setTripStatus('searching');
     
@@ -308,8 +358,8 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
         setIsSearching(false);
         setTripStatus('idle');
         setActiveTrip({
-          driver: 'Musa Ibrahim',
-          keke: 'KL-2024-089',
+          driver: specificKekeId ? 'Selected Driver' : 'Musa Ibrahim',
+          keke: specificKekeId || 'KL-2024-089',
           eta: '3 mins',
           fare: useStudentDiscount ? Math.round(pricingDetails.total_fare * 0.8) : pricingDetails.total_fare,
           rating: 4.8,
@@ -334,14 +384,29 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
   };
 
   const handleSOS = () => {
+    setShowSosConfirmModal(true);
+  };
+
+  const startSosCountdown = () => {
+    setShowSosConfirmModal(false);
     setSosCountdown(SOS_DURATION);
+    if ("vibrate" in navigator) {
+      navigator.vibrate([100, 50, 100]);
+    }
   };
 
   const confirmAndSendSOS = () => {
+    if ("vibrate" in navigator) {
+      navigator.vibrate([500, 200, 500]);
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const sosData = { 
         type: 'sos', 
-        location: 'Current GPS Location',
+        userId: user.id,
+        userName: user.name,
+        location: `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}`,
+        lat: currentLocation.lat,
+        lng: currentLocation.lng,
         tripData: activeTrip ? {
           driver: activeTrip.driver,
           keke: activeTrip.keke,
@@ -435,6 +500,55 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-6">
+      {/* Critical SOS Full Screen Alert */}
+      <AnimatePresence>
+        {criticalSosAlert && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] bg-red-600 flex items-center justify-center p-6 text-white text-center"
+          >
+            <motion.div 
+              initial={{ scale: 0.8, y: 50 }}
+              animate={{ scale: 1, y: 0 }}
+              className="max-w-lg w-full"
+            >
+              <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-8 animate-pulse">
+                <AlertTriangle size={64} className="text-white" />
+              </div>
+              <h1 className="text-4xl font-black mb-4 uppercase tracking-tighter">Critical SOS Alert</h1>
+              <p className="text-xl font-bold mb-8 opacity-90">
+                A KekeLink user ({criticalSosAlert.userName}) has triggered an emergency SOS within 5km of your location.
+              </p>
+              
+              <div className="bg-black/20 backdrop-blur-md rounded-3xl p-6 mb-8 border border-white/10 text-left">
+                <div className="flex items-center gap-3 mb-4">
+                  <MapPin size={20} />
+                  <span className="font-bold uppercase text-sm tracking-wider">Location: {criticalSosAlert.location}</span>
+                </div>
+                {criticalSosAlert.tripData && (
+                  <div className="space-y-2 text-sm opacity-80">
+                    <p>Driver: {criticalSosAlert.tripData.driver || criticalSosAlert.userName}</p>
+                    <p>Keke ID: {criticalSosAlert.tripData.keke || 'N/A'}</p>
+                    <p>Route: {criticalSosAlert.tripData.origin} → {criticalSosAlert.tripData.destination}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <button 
+                  onClick={() => setCriticalSosAlert(null)}
+                  className="w-full py-5 bg-white text-red-600 rounded-2xl font-black text-lg shadow-xl hover:bg-slate-50 transition-all"
+                >
+                  I Understand
+                </button>
+                <p className="text-xs opacity-60 font-medium">Authorities have been notified. Please stay vigilant.</p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Driver Rating Modal */}
       <AnimatePresence>
         {pendingRating && (
@@ -594,6 +708,107 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
         )}
       </AnimatePresence>
 
+      {/* General Trip Request Confirmation Modal */}
+      <AnimatePresence>
+        {showGeneralConfirmation && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl p-8"
+            >
+              <div className="text-center mb-6">
+                <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Navigation className="text-emerald-600" size={40} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Confirm Request</h2>
+                <p className="text-slate-500 text-sm mt-2">Ready to find a Keke to {destination}?</p>
+              </div>
+
+              <div className="bg-slate-50 rounded-2xl p-4 mb-8 border border-slate-100">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Estimated Fare</span>
+                  <span className="text-sm font-bold text-emerald-600">
+                    ₦{useStudentDiscount ? Math.round(pricingDetails.total_fare * 0.8) : pricingDetails.total_fare}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Payment Method</span>
+                  <span className="text-xs font-bold text-slate-900">Cash / Transfer</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <button 
+                  onClick={() => setShowGeneralConfirmation(false)}
+                  className="py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => executeSearch()}
+                  className="py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Initial Trip Request Confirmation Modal */}
+      <AnimatePresence>
+        {showTripConfirmationModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl p-8"
+            >
+              <div className="text-center mb-6">
+                <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Car className="text-emerald-600" size={40} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Request Trip</h2>
+                <p className="text-slate-500 text-sm mt-2">Do you want to request a trip to {showTripConfirmationModal.destination}?</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <button 
+                  onClick={() => setShowTripConfirmationModal(null)}
+                  className="py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    const dest = showTripConfirmationModal.destination;
+                    setShowTripConfirmationModal(null);
+                    fetchPricing(dest);
+                  }}
+                  className="py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Trip Confirmation Modal */}
       <AnimatePresence>
         {showTripConfirmation && (
@@ -638,13 +853,53 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                 <button 
                   onClick={() => {
                     setKekeId(showTripConfirmation.kekeId);
-                    setShowTripConfirmation(null);
-                    setSelectedKeke(null);
-                    handleSearch();
+                    executeSearch(showTripConfirmation.kekeId);
                   }}
                   className="py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
                 >
                   Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* SOS Initial Confirmation Modal */}
+      <AnimatePresence>
+        {showSosConfirmModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl p-8 text-center"
+            >
+              <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                <AlertTriangle className="text-red-600" size={40} />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">Emergency SOS?</h2>
+              <p className="text-slate-500 text-sm mb-8">
+                Are you sure you want to trigger an Emergency SOS? This will alert nearby drivers, community leaders, and authorities.
+              </p>
+
+              <div className="flex flex-col gap-3">
+                <button 
+                  onClick={startSosCountdown}
+                  className="w-full py-4 bg-red-600 text-white rounded-2xl font-bold hover:bg-red-700 transition-all shadow-lg shadow-red-100"
+                >
+                  Yes, Trigger SOS
+                </button>
+                <button 
+                  onClick={() => setShowSosConfirmModal(false)}
+                  className="w-full py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                >
+                  No, Cancel
                 </button>
               </div>
             </motion.div>
@@ -823,42 +1078,33 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                       whileHover={{ scale: 1.2, zIndex: 40 }}
                       className="absolute cursor-pointer group"
                       style={{ 
-                        top: `${40 + (keke.lat - 12.0022) * 2000}%`, 
-                        left: `${50 + (keke.lng - 8.5920) * 2000}%` 
+                        top: `${50 + (keke.lat - currentLocation.lat) * 2000}%`, 
+                        left: `${50 + (keke.lng - currentLocation.lng) * 2000}%` 
                       }}
                       onClick={() => setSelectedKeke(keke)}
                     >
                       <div className={`relative ${
-                        status === 'On Trip' ? 'bg-blue-600 ring-4 ring-blue-500/20' : 
+                        status === 'On Trip' ? 'bg-blue-600 ring-2 ring-blue-500/10' : 
                         status === 'Offline' ? 'bg-slate-400 grayscale' : 
-                        'bg-emerald-600 ring-4 ring-emerald-500/20'
-                      } text-white p-2.5 rounded-2xl shadow-xl transition-all duration-300`}>
-                        <Car size={18} className={status === 'Available' ? 'animate-bounce' : ''} />
+                        'bg-emerald-600 ring-2 ring-emerald-500/10'
+                      } text-white p-1.5 rounded-xl shadow-lg transition-all duration-300`}>
+                        <Car size={14} className={status === 'Available' ? 'animate-bounce' : ''} />
                         
                         {/* Status Indicator Dot */}
-                        <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
+                        <div className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-white ${
                           status === 'On Trip' ? 'bg-blue-400' : 
                           status === 'Offline' ? 'bg-slate-300' : 
                           'bg-emerald-400'
                         }`} />
                       </div>
 
-                      {/* Status Text Label */}
-                      <div className="mt-1.5 text-center">
-                        <span className={`text-[7px] font-black uppercase px-1.5 py-0.5 rounded-md shadow-sm border border-white/20 whitespace-nowrap ${
-                          status === 'On Trip' ? 'bg-blue-600 text-white' : 
-                          status === 'Offline' ? 'bg-slate-500 text-white' : 
-                          'bg-emerald-600 text-white'
-                        }`}>
-                          {status}
-                        </span>
-                      </div>
+                      {/* Status Text Label (Hidden by default, shown on hover if needed, but we have tooltip now) */}
                       
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[10px] px-3 py-2 rounded-xl shadow-2xl z-50">
-                        <div className="flex flex-col gap-1">
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-slate-900 text-white text-[9px] px-2.5 py-1.5 rounded-lg shadow-2xl z-50 border border-white/10">
+                        <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-2">
                             <p className="font-bold">{keke.name}</p>
-                            <span className={`text-[8px] px-1.5 py-0.5 rounded-md uppercase font-black ${
+                            <span className={`text-[7px] px-1 py-0.5 rounded uppercase font-black ${
                               status === 'On Trip' ? 'bg-blue-500' : 
                               status === 'Offline' ? 'bg-slate-700' : 
                               'bg-emerald-500'
@@ -866,15 +1112,15 @@ export const PassengerDashboard = ({ user }: { user: any }) => {
                               {status}
                             </span>
                           </div>
-                          <div className="flex items-center justify-between gap-4">
-                            <p className="opacity-70 font-mono">{keke.kekeId}</p>
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="opacity-70 font-mono tracking-tighter">{keke.kekeId}</p>
                             <div className="flex items-center gap-0.5 text-yellow-400">
-                              <Star size={8} fill="currentColor" />
+                              <Star size={7} fill="currentColor" />
                               <span className="font-bold">4.8</span>
                             </div>
                           </div>
                         </div>
-                        <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-slate-900" />
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900" />
                       </div>
                     </motion.div>
                   );

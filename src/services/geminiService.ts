@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
@@ -100,12 +100,13 @@ export const geminiService = {
         model: "gemini-3-flash-preview",
         contents: `Analyze this real-time Keke trip data for anomalies in Northern Nigeria (e.g., Kano): ${JSON.stringify(tripData)}.
         Look for:
-        1. Route Deviation: Is the current location far from the expected path to ${tripData.destination}?
+        1. Route Deviation: Is the current location far from the expected path to ${tripData.destination}? Current route adherence score: ${tripData.route_adherence * 100}%.
         2. Speed Anomalies: Is the speed (${tripData.speed} km/h) unusual for a Keke (max ~50km/h) or the area?
         3. Long Stops: Has the Keke been stationary in an unusual spot?
         4. Late Night Activity: Is this happening at an unsafe hour?
         
-        Provide a risk level: 'low', 'medium', or 'high'. If high, suggest immediate authority notification.`,
+        Provide a risk level: 'low', 'medium', or 'high'. If high, suggest immediate authority notification.
+        The 'reason' should be a short, clear warning message suitable for a voice alert to the driver.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -303,11 +304,54 @@ export const geminiService = {
     });
   },
 
+  async getTripIntelligenceUpdate(origin: string, destination: string, progress: number) {
+    return handleAiCall(async () => {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Generate a real-time trip update for a passenger in a Keke in Kano, Nigeria.
+        Trip: ${origin} to ${destination}
+        Progress: ${progress}%
+        
+        Provide a short, helpful, and realistic update message (e.g., 'Approaching a minor traffic jam at Zoo Road', 'Driver taking a shortcut through Sabon Gari to avoid road closure').
+        Keep it under 15 words.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              update_message: { type: Type.STRING },
+              is_rerouted: { type: Type.BOOLEAN },
+              delay_minutes: { type: Type.NUMBER }
+            },
+            required: ["update_message"]
+          }
+        }
+      });
+      return JSON.parse(response.text || "{}");
+    }, { 
+      update_message: "Trip proceeding smoothly along the main corridor.",
+      is_rerouted: false,
+      delay_minutes: 0
+    });
+  },
+
   async getSafetyCoaching(driverStats: any) {
     return handleAiCall(async () => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Based on these driver stats: ${JSON.stringify(driverStats)}, provide 3 actionable safety coaching tips for a Keke driver in Northern Nigeria. Focus on route adherence, passenger safety, and vehicle maintenance.`,
+        contents: `You are an AI Safety Coach for KekeLink, a ride-hailing service in Northern Nigeria (Kano, Zaria, Kaduna).
+        Analyze these driver performance metrics: ${JSON.stringify(driverStats)}.
+        
+        Generate:
+        1. A safety score (0-100) based on these metrics.
+        2. 3-4 highly personalized, actionable safety coaching tips. 
+        3. A brief, encouraging summary in a mix of professional English and local context (e.g., using terms like 'Sannu', 'Nagode', or referencing local landmarks/conditions if applicable).
+        
+        Focus areas:
+        - Route adherence (staying on designated corridors).
+        - Anomaly management (how they handled detected risks).
+        - Passenger comfort and safety.
+        - Vehicle maintenance for the local climate.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -327,8 +371,8 @@ export const geminiService = {
       return JSON.parse(response.text || "{}");
     }, { 
       score: 85, 
-      tips: ["Maintain consistent speed", "Follow designated Keke corridors", "Check tire pressure daily"], 
-      summary: "Safety coaching is temporarily limited. Stay alert and follow standard protocols." 
+      tips: ["Maintain consistent speed on BUK Road", "Follow designated Keke corridors near Sabon Gari", "Check tire pressure daily due to heat"], 
+      summary: "Sannu! Your safety coaching is temporarily limited. Stay alert and follow standard protocols. Nagode!" 
     });
   },
 
@@ -355,5 +399,25 @@ export const geminiService = {
       });
       return JSON.parse(response.text || "{}");
     }, { summary: "Trip is proceeding as planned.", category: "Trip Update", priority: "low" });
+  },
+
+  async generateVoiceAlert(text: string) {
+    return handleAiCall(async () => {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: `Alert the driver: ${text}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Fenrir' }, // Strong, clear voice for alerts
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      return base64Audio;
+    }, null);
   }
 };

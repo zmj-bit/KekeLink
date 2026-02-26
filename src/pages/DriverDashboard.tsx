@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X, Car, MapPin, MessageCircle } from 'lucide-react';
+import { Camera, Shield, TrendingUp, Map, Star, AlertCircle, Clock, UserCheck, Navigation, CheckCircle2, AlertTriangle, Bell, Info, X, Car, MapPin, MessageCircle, RefreshCw, Settings } from 'lucide-react';
 import { geminiService } from '../services/geminiService';
 import { SafetyReportModal } from '../components/SafetyReportModal';
 
@@ -68,6 +68,10 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     traffic_level: 'moderate'
   });
   const [isAuthoritiesAlerted, setIsAuthoritiesAlerted] = useState(false);
+  const [criticalSosAlert, setCriticalSosAlert] = useState<any>(null);
+  const [voiceAlertsEnabled, setVoiceAlertsEnabled] = useState(true);
+  const [isPlayingVoice, setIsPlayingVoice] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -159,6 +163,47 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
     }
   }, [isOnShift]);
 
+  const playVoiceAlert = async (text: string) => {
+    if (!voiceAlertsEnabled || isPlayingVoice) return;
+    setIsPlayingVoice(true);
+    try {
+      const base64Audio = await geminiService.generateVoiceAlert(text);
+      if (base64Audio) {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        const binaryString = atob(base64Audio);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        const arrayBuffer = bytes.buffer;
+        const int16Array = new Int16Array(arrayBuffer);
+        const float32Array = new Float32Array(int16Array.length);
+        
+        for (let i = 0; i < int16Array.length; i++) {
+          float32Array[i] = int16Array[i] / 32768;
+        }
+        
+        const audioBuffer = audioContext.createBuffer(1, float32Array.length, 24000);
+        audioBuffer.getChannelData(0).set(float32Array);
+        
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.onended = () => {
+          setIsPlayingVoice(false);
+          audioContext.close();
+        };
+        source.start();
+      } else {
+        setIsPlayingVoice(false);
+      }
+    } catch (error) {
+      console.error("Voice alert error:", error);
+      setIsPlayingVoice(false);
+    }
+  };
+
   useEffect(() => {
     let interval: any;
     if (activeTrip && tripProgress > 0 && tripProgress < 100) {
@@ -167,6 +212,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
           current_location: `${currentLocation.lat}, ${currentLocation.lng}`,
           destination: activeTrip.destination,
           speed: Math.floor(Math.random() * 40) + 10,
+          route_adherence: shiftMetrics.route_adherence,
           time: new Date().toISOString(),
           progress: tripProgress
         };
@@ -177,9 +223,13 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             setAnomalyWarning(result);
             setShiftMetrics(prev => ({ ...prev, anomalies_detected: prev.anomalies_detected + 1 }));
             
+            // Trigger voice alert for medium/high risk
+            if (result.risk_level !== 'low') {
+              playVoiceAlert(result.reason);
+            }
+
             if (result.risk_level === 'high' || result.should_alert_authorities) {
               setIsAuthoritiesAlerted(true);
-              // In a real app, this would call a dedicated emergency API
               console.log("!!! ALERTING AUTHORITIES !!!", result.reason);
             }
 
@@ -199,10 +249,10 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         } catch (error) {
           console.warn("Anomaly detection error (likely rate limit):", error);
         }
-      }, 30000); // Increased interval to 30s
+      }, 30000); 
     }
     return () => clearInterval(interval);
-  }, [activeTrip, tripProgress, user.id]);
+  }, [activeTrip, tripProgress, user.id, voiceAlertsEnabled, shiftMetrics.route_adherence]);
 
   useEffect(() => {
     let interval: any;
@@ -259,6 +309,7 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
               setAlerts(prev => [data, ...prev].slice(0, 3));
             }
             if (data.type === 'sos_alert') {
+              setCriticalSosAlert(data);
               const tripInfo = data.tripData ? ` (Trip: ${data.tripData.origin} to ${data.tripData.destination})` : '';
               const authorities = data.notifiedAuthorities ? ` [Authorities Notified: ${data.notifiedAuthorities.join(', ')}]` : '';
               setAlerts(prev => [{
@@ -451,6 +502,8 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
         userId: user.id,
         userName: user.name,
         location: `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}`,
+        lat: currentLocation.lat,
+        lng: currentLocation.lng,
         tripData: activeTrip ? {
           origin: activeTrip.origin,
           destination: activeTrip.destination,
@@ -629,6 +682,61 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-6">
+      {/* Critical SOS Full Screen Alert */}
+      <AnimatePresence>
+        {criticalSosAlert && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] bg-red-600 flex items-center justify-center p-6 text-white text-center"
+          >
+            <motion.div 
+              initial={{ scale: 0.8, y: 50 }}
+              animate={{ scale: 1, y: 0 }}
+              className="max-w-lg w-full"
+            >
+              <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-8 animate-pulse">
+                <AlertTriangle size={64} className="text-white" />
+              </div>
+              <h1 className="text-4xl font-black mb-4 uppercase tracking-tighter">Critical SOS Alert</h1>
+              <p className="text-xl font-bold mb-8 opacity-90">
+                A KekeLink user ({criticalSosAlert.userName}) has triggered an emergency SOS within 5km of your location.
+              </p>
+              
+              <div className="bg-black/20 backdrop-blur-md rounded-3xl p-6 mb-8 border border-white/10 text-left">
+                <div className="flex items-center gap-3 mb-4">
+                  <MapPin size={20} />
+                  <span className="font-bold uppercase text-sm tracking-wider">Location: {criticalSosAlert.location}</span>
+                </div>
+                {criticalSosAlert.tripData && (
+                  <div className="space-y-2 text-sm opacity-80">
+                    <p>User: {criticalSosAlert.userName}</p>
+                    <p>Keke ID: {criticalSosAlert.tripData.keke || 'N/A'}</p>
+                    <p>Route: {criticalSosAlert.tripData.origin} → {criticalSosAlert.tripData.destination}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <button 
+                  onClick={() => setCriticalSosAlert(null)}
+                  className="w-full py-5 bg-white text-red-600 rounded-2xl font-black text-lg shadow-xl hover:bg-slate-50 transition-all"
+                >
+                  I'm Nearby & Can Assist
+                </button>
+                <button 
+                  onClick={() => setCriticalSosAlert(null)}
+                  className="w-full py-4 bg-transparent border border-white/40 text-white rounded-2xl font-bold hover:bg-white/10 transition-all"
+                >
+                  Dismiss
+                </button>
+                <p className="text-xs opacity-60 font-medium">Authorities have been notified. Please stay vigilant.</p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Anomaly Warning Overlay */}
       <AnimatePresence>
         {anomalyWarning && (
@@ -784,25 +892,34 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
             <div className="flex items-center gap-6">
               <div className="flex flex-col items-end gap-1">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">Shift Status</p>
-                <div className="flex items-center gap-2">
-                  <span className={`text-xs font-bold ${isOnShift ? 'text-emerald-600' : 'text-slate-400'}`}>
-                    {isOnShift ? 'ONLINE' : 'OFFLINE'}
-                  </span>
+                <div className="flex items-center gap-3">
                   <button 
-                    onClick={() => {
-                      if (activeTrip) {
-                        alert("Please complete your active trip before going offline.");
-                        return;
-                      }
-                      setIsOnShift(!isOnShift);
-                    }}
-                    className={`w-12 h-6 rounded-full transition-all relative shadow-inner ${isOnShift ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="p-1.5 rounded-lg bg-slate-50 text-slate-400 hover:text-slate-600 transition-all"
+                    title="Settings"
                   >
-                    <motion.div 
-                      animate={{ x: isOnShift ? 26 : 2 }}
-                      className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
-                    />
+                    <Settings size={16} />
                   </button>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs font-bold ${isOnShift ? 'text-emerald-600' : 'text-slate-400'}`}>
+                      {isOnShift ? 'ONLINE' : 'OFFLINE'}
+                    </span>
+                    <button 
+                      onClick={() => {
+                        if (activeTrip) {
+                          alert("Please complete your active trip before going offline.");
+                          return;
+                        }
+                        setIsOnShift(!isOnShift);
+                      }}
+                      className={`w-12 h-6 rounded-full transition-all relative shadow-inner ${isOnShift ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                    >
+                      <motion.div 
+                        animate={{ x: isOnShift ? 26 : 2 }}
+                        className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
               <div className="text-right border-l border-slate-100 pl-6">
@@ -1412,7 +1529,14 @@ export const DriverDashboard = ({ user, onUpdateUser }: { user: any, onUpdateUse
                 <h3 className="font-bold flex items-center gap-2 text-slate-900">
                   <Shield className="text-emerald-600" /> AI Safety Coaching
                 </h3>
-                {isCoachingLoading && <Clock size={14} className="animate-spin text-slate-400" />}
+                <button 
+                  onClick={() => fetchSafetyCoaching(shiftMetrics)}
+                  disabled={isCoachingLoading}
+                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all disabled:opacity-50"
+                  title="Refresh Coaching"
+                >
+                  <RefreshCw size={16} className={isCoachingLoading ? 'animate-spin' : ''} />
+                </button>
               </div>
 
               {/* Safety Score Gauge (Simplified) */}
